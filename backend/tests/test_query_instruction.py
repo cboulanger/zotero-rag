@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock
 from backend.config.presets import EmbeddingConfig
 from backend.services.embeddings import (
     DEFAULT_QUERY_INSTRUCTIONS,
-    LocalEmbeddingService,
     MockEmbeddingService,
     RemoteEmbeddingService,
+    create_embedding_service,
     format_query_for_embedding,
     resolve_query_instruction,
 )
@@ -55,13 +55,6 @@ class TestEmbedQuery(unittest.IsolatedAsyncioTestCase):
         service.embed_text = AsyncMock(return_value=[0.5])
         self.assertEqual(await service.embed_query("Who uses Zotero?"), [0.5])
         service.embed_text.assert_awaited_once_with(f"Instruct: {E5_INSTRUCTION}\nQuery: Who uses Zotero?")
-
-    async def test_local_service_without_instruction_embeds_bare(self):
-        name = "sentence-transformers/all-MiniLM-L6-v2"
-        service = LocalEmbeddingService(EmbeddingConfig(model_name=name))
-        service.embed_text = AsyncMock(return_value=[0.5])
-        await service.embed_query("Who uses Zotero?")
-        service.embed_text.assert_awaited_once_with("Who uses Zotero?")
 
     async def test_preset_can_turn_it_off(self):
         config = EmbeddingConfig(model_type="remote", model_name=E5, query_instruction="")

@@ -50,7 +50,7 @@ npm run test:all
 
 ```bash
 # Unit tests
-uv run pytest
+uv run pytest            # backend/tests plus every shipped plugin's bundled tests (backend/plugins/*/tests)
 
 # Integration tests
 uv run pytest -m integration -v -s

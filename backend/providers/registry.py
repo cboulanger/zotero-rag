@@ -1,13 +1,12 @@
 """Provider discovery, lookup and the load-time validation of a preset's providers.
 
-Importing this package imports every sibling module, and each ``Provider``
-subclass registers itself by its ``id`` (see ``Provider.__init_subclass__``),
-so adding a provider is adding a module - there is no central list to edit.
+Provider classes come from backend plugins: each plugin registers its providers as
+``inference.provider`` capabilities when the plugin host loads it (see
+``backend.pluginhost``), so adding a provider is adding a plugin - there is no
+central list to edit, and removing a plugin removes its providers.
 """
 
-import importlib
 import logging
-import pkgutil
 from typing import Optional
 
 from backend.providers.base import PROVIDERS, Provider
@@ -15,22 +14,12 @@ from backend.providers.types import ProviderConfigError, Side, preset_sides, sid
 
 logger = logging.getLogger(__name__)
 
-#: Modules of this package that are infrastructure, not providers.
-_NON_PROVIDER_MODULES = frozenset({"base", "registry", "types", "usage"})
-
-_discovered = False
-
 
 def discover_providers() -> dict[str, type[Provider]]:
-    """Import every provider module once and return the registry."""
-    global _discovered
-    if not _discovered:
-        package = importlib.import_module("backend.providers")
-        for info in pkgutil.iter_modules(package.__path__):
-            if info.name.startswith("_") or info.name in _NON_PROVIDER_MODULES:
-                continue
-            importlib.import_module(f"backend.providers.{info.name}")
-        _discovered = True
+    """Load the backend plugins once and return the provider registry."""
+    from backend.pluginhost import get_plugin_host
+
+    get_plugin_host()
     return PROVIDERS
 
 
@@ -38,7 +27,7 @@ def _side_config(preset, side: Side):
     return side_config(preset, side)
 
 
-def _supported_sides(cls: type[Provider]) -> frozenset:
+def supported_sides(cls: type[Provider]) -> frozenset:
     """Sides ``cls`` may serve. The generic provider (the base class itself, used for
     every local side and for plain OpenAI-compatible endpoints) also serves the optional
     re-ranking side; vendor subclasses opt in by listing ``"rerank"`` themselves."""
@@ -86,17 +75,18 @@ def get_providers(preset) -> dict[Side, Provider]:
         cls = registry.get(provider_cfg.id)
         if cls is None:
             raise ProviderConfigError(
-                f"{side}: unknown provider id {provider_cfg.id!r} (available: {', '.join(sorted(registry))})"
+                f"{side}: unknown provider id {provider_cfg.id!r}: no loaded backend plugin provides it "
+                f"(available: {', '.join(sorted(registry))})"
             )
         if cfg.model_type == "local" and provider_cfg.id != "generic":
             raise ProviderConfigError(
                 f"{side}: provider {provider_cfg.id!r} cannot serve a local model "
                 "(a local side needs no provider; remove the provider block)"
             )
-        if side not in _supported_sides(cls):
+        if side not in supported_sides(cls):
             raise ProviderConfigError(
                 f"{side}: provider {provider_cfg.id!r} does not support the {side} side "
-                f"(supports: {', '.join(sorted(_supported_sides(cls)))})"
+                f"(supports: {', '.join(sorted(supported_sides(cls)))})"
             )
         scope = provider_cfg.scope or cls.default_scope
         if scope not in cls.key_scopes:

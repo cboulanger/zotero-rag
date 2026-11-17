@@ -14,13 +14,12 @@ import logging
 
 from backend.__version__ import __version__
 from backend.config.settings import get_settings
-from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store, resolve_zotero_identity
 from backend.services.access_gate import assert_safe_to_start
 from backend.services.caller_context import use_caller
 from backend.services.effective_preset import get_user_preset, standin_applies, use_preset
 from backend.utils.log_rotation import RotatingLogHandler
-from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query, autoindex, auth, migration, admin_settings, indexed_tags
+from backend.api import status, config, libraries, indexing, query, document_upload, registration, rate_limits, public_query, autoindex, auth, migration, admin_settings, indexed_tags
 from backend.api.document_upload import load_item_cache, save_item_cache
 
 # Get settings to access log configuration
@@ -143,19 +142,14 @@ async def lifespan(app: FastAPI):
         app.state.health_check_task = health_check_task
         logger.info(f"Health check scheduler started (every {settings.health_check_interval_minutes} min)")
 
-    # Per-user MPCDF sessions (re-ranking endpoints on each user's own account).
-    from backend.services import mpcdf_sessions
-    mpcdf = mpcdf_sessions.get_sessions() if mpcdf_sessions.available() else None
-    if mpcdf is not None:
-        try:
-            await mpcdf.open()
-        except Exception as e:
-            logger.warning(f"Could not start MPCDF sessions: {e}")
+    # Backend plugins: load them (each registers its capabilities) and run their startup hooks.
+    from backend.pluginhost import get_plugin_host
+    plugin_host = get_plugin_host()
+    await plugin_host.startup()
 
     yield
 
-    if mpcdf is not None:
-        await mpcdf.close()
+    await plugin_host.shutdown()
 
     if scheduler_task is not None:
         scheduler_task.cancel()
@@ -257,88 +251,7 @@ app.include_router(admin_settings.router, prefix="/api", tags=["admin-settings"]
 app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(indexed_tags.router, prefix="/api", tags=["indexed-tags"])
 app.include_router(migration.router, prefix="/api", tags=["migration"])
-
-
-@app.get("/")
-def root(request: Request):
-    """Root endpoint — service info, preset config, and vector store statistics."""
-    preset = settings.get_hardware_preset()
-    vector_store: VectorStore = request.app.state.vector_store
-
-    embedding_cfg = preset.embedding
-    llm_cfg = preset.llm
-    rag_cfg = preset.rag
-
-    try:
-        db_stats = vector_store.get_collection_info()
-    except Exception as exc:
-        db_stats = {"error": str(exc)}
-
-    response = {
-        "service": "Zotero RAG API",
-        "version": __version__,
-        "status": "running",
-        "preset": {
-            "name": preset.name,
-            "description": preset.description,
-            "memory_budget_gb": preset.memory_budget_gb,
-        },
-        "embedding": {
-            "model_type": embedding_cfg.model_type,
-            "model_name": embedding_cfg.model_name,
-            "base_url": embedding_cfg.model_kwargs.get("base_url"),
-            "embedding_dim": db_stats.get("embedding_dim"),
-            "distance": db_stats.get("distance"),
-        },
-        "llm": {
-            "model_type": llm_cfg.model_type,
-            "model_name": llm_cfg.model_name,
-            "base_url": llm_cfg.model_kwargs.get("base_url"),
-            "max_context_length": llm_cfg.max_context_length,
-            "temperature": llm_cfg.temperature,
-        },
-        "rag": {
-            "top_k": rag_cfg.top_k,
-            "score_threshold": rag_cfg.score_threshold,
-            "max_chunk_size": rag_cfg.max_chunk_size,
-        },
-        "vector_db": {
-            "path": str(vector_store.storage_path) if vector_store is not None else None,
-            "chunks": db_stats.get("chunks_count"),
-            "indexed_documents": db_stats.get("dedup_count"),
-            "libraries_count": db_stats.get("metadata_count"),
-        },
-    }
-
-    # Whether auto-indexing is enabled — the only auto-index detail exposed on
-    # this unauthenticated endpoint. `enabled` is False when AUTOINDEX_SECRET is
-    # unset (the feature is disabled and no keys can be decrypted). Key counts and
-    # live per-run progress live on the authenticated GET /api/autoindex/status.
-    from backend.services.secret_store import get_key_store
-    from backend.services.autoindex_scheduler import read_scheduler_state
-    # Re-fetch settings here rather than reusing the module-level `settings`
-    # captured once at import time (line 24): that snapshot never reflects
-    # get_settings() being reset/reconfigured later (e.g. reset_settings() in
-    # tests, or any future runtime reconfiguration), so reading it directly
-    # would silently report stale enabled/scheduler state.
-    current_settings = get_settings()
-    try:
-        store = get_key_store()
-        enabled = store.enabled
-    except Exception as exc:
-        logger.warning("Failed to read auto-index key store: %s", exc)
-        enabled = False
-
-    response["cron_indexing"] = {
-        "enabled": enabled,
-        "scheduler": {
-            "active": bool(current_settings.autoindex_interval_minutes),
-            "interval_minutes": current_settings.autoindex_interval_minutes,
-            "paused": read_scheduler_state(current_settings.data_path).get("paused", False),
-        },
-    }
-
-    return response
+app.include_router(status.router, tags=["status"])
 
 
 async def _check_http(client: httpx.AsyncClient, url: str) -> tuple[str, str | None]:

@@ -1,47 +1,13 @@
 """RunPodProvider: ported from the former provisioning script's tests, per side."""
 
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from backend.providers import Credentials, ProvisionContext, ProvisionError, ProvisionTimeout, get_providers
-from backend.providers import runpod as runpod_module
-from backend.providers.runpod import RunPodProvider, endpoint_base_url
-from backend.tests.provider_fakes import FakeHTTP, FakeResponse
-from backend.tests.test_providers_registry import make_preset
-
-EMB_URL_ENV, LLM_URL_ENV = "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"
-
-
-def runpod_preset(options=None, scope="managed"):
-    """A runpod preset. ``user``: the user's own key, URLs derived from it. ``managed``:
-    the shared-field shape on the test-only managed subclass (RunPod itself is user-only)."""
-    from backend.tests.runpod_variants import MANAGED_PROVIDER_ID
-
-    preset = make_preset()
-    for side, url_env in ((preset.embedding, EMB_URL_ENV), (preset.llm, LLM_URL_ENV)):
-        side.provider.id = "runpod" if scope == "user" else MANAGED_PROVIDER_ID
-        side.provider.scope = scope
-        side.provider.options = options or {}
-        side.model_kwargs = (
-            {"api_key_env": "RUNPOD_API_KEY"} if scope == "user"
-            else {"shared_api_key_env": "RUNPOD_API_KEY", "shared_base_url_env": url_env}
-        )
-    preset.embedding.model_name = "intfloat/multilingual-e5-large-instruct"
-    preset.llm.model_names = ["Qwen/Qwen2.5-7B-Instruct"]
-    return preset
-
-
-def provider(side="llm", options=None, http=None, scope="managed"):
-    p = get_providers(runpod_preset(options, scope))[side]
-    p._http_client = http or FakeHTTP()
-    return p
-
-
-def ctx(side="llm", **kw):
-    return ProvisionContext(side=side, preset=runpod_preset(), credential=kw.pop("credential", "rpa_key"),
-                            data_path=Path("."), **kw)
-
+from backend.plugins.runpod import provider as runpod_module
+from backend.plugins.runpod.provider import endpoint_base_url
+from backend.plugins.runpod.testing import LLM_URL_ENV, ctx, provider, runpod_preset
+from backend.providers import Credentials, ProvisionError, ProvisionTimeout, get_providers
+from backend.providers.testing import FakeHTTP, FakeResponse
 
 #: GET /v2/catalog/gpus: two pools of the real catalog (abridged).
 CATALOG = {"gpus": [

@@ -61,7 +61,7 @@ class AutoIndexApiTest(unittest.TestCase):
     def test_post_stores_valid_embedding_key(self):
         from backend.services.embedding_key_validator import EmbeddingKeyValidation
         validation = KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True)
-        emb_validation = EmbeddingKeyValidation(status="ok", key_name="KISSKI_API_KEY")
+        emb_validation = EmbeddingKeyValidation(status="ok", key_name="TESTVENDOR_API_KEY")
         with patch("backend.api.autoindex.validate_key", new=AsyncMock(return_value=validation)), \
              patch("backend.api.autoindex.validate_embedding_key", new=AsyncMock(return_value=emb_validation)):
             r = self.client.post("/api/autoindex/keys", json={"api_key": "RO", "embedding_api_key": "EMB"})
@@ -74,7 +74,7 @@ class AutoIndexApiTest(unittest.TestCase):
     def test_post_rejects_invalid_embedding_key_but_keeps_zotero_key(self):
         from backend.services.embedding_key_validator import EmbeddingKeyValidation
         validation = KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True)
-        emb_validation = EmbeddingKeyValidation(status="invalid", key_name="KISSKI_API_KEY", reason="bad creds")
+        emb_validation = EmbeddingKeyValidation(status="invalid", key_name="TESTVENDOR_API_KEY", reason="bad creds")
         with patch("backend.api.autoindex.validate_key", new=AsyncMock(return_value=validation)), \
              patch("backend.api.autoindex.validate_embedding_key", new=AsyncMock(return_value=emb_validation)):
             r = self.client.post("/api/autoindex/keys", json={"api_key": "RO", "embedding_api_key": "BAD"})
@@ -146,7 +146,7 @@ class AutoIndexApiTest(unittest.TestCase):
     def _set_model_type(self, model_type: str) -> None:
         mock_preset = MagicMock()
         mock_preset.embedding.model_type = model_type
-        mock_preset.embedding.model_kwargs = {"api_key_env": "KISSKI_API_KEY"}
+        mock_preset.embedding.model_kwargs = {"api_key_env": "TESTVENDOR_API_KEY"}
         # Settings is a pydantic v2 BaseSettings model, which blocks plain
         # `settings.get_hardware_preset = ...` assignment (raises ValueError:
         # not a declared field). object.__setattr__ bypasses pydantic's
@@ -185,7 +185,7 @@ class AutoIndexApiTest(unittest.TestCase):
 
     def test_run_succeeds_with_valid_embedding_key_on_remote_preset(self):
         from backend.services.embedding_key_validator import EmbeddingKeyValidation
-        emb_validation = EmbeddingKeyValidation(status="ok", key_name="KISSKI_API_KEY")
+        emb_validation = EmbeddingKeyValidation(status="ok", key_name="TESTVENDOR_API_KEY")
         validation = KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True)
         with patch("backend.api.autoindex.validate_key", new=AsyncMock(return_value=validation)), \
              patch("backend.api.autoindex.validate_embedding_key", new=AsyncMock(return_value=emb_validation)):
@@ -208,9 +208,9 @@ class AutoIndexApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 409)
         self.assertIn("already running", r.json()["detail"])
 
-    def test_root_reports_scheduler_subobject(self):
+    def test_status_reports_scheduler_subobject(self):
         get_settings().autoindex_interval_minutes = 30
-        r = self.client.get("/")
+        r = self.client.get("/status")
         scheduler = r.json()["cron_indexing"]["scheduler"]
         self.assertTrue(scheduler["active"])
         self.assertEqual(scheduler["interval_minutes"], 30)

@@ -280,9 +280,19 @@ class TestRootEndpoints(unittest.TestCase):
     def tearDown(self):
         del app.state.vector_store
 
-    def test_root(self):
-        """Test GET / endpoint."""
+    def test_root_points_to_status_and_sides(self):
+        """GET / only names the service and where the details are."""
         response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "/status")
+        self.assertEqual(data["sides"], "/sides")
+        self.assertIn("version", data)
+        self.assertNotIn("embedding", data)
+
+    def test_status(self):
+        """GET /status: service state, plugins and capabilities."""
+        response = self.client.get("/status")
         self.assertEqual(response.status_code, 200)
 
         data = response.json()
@@ -290,7 +300,7 @@ class TestRootEndpoints(unittest.TestCase):
         self.assertIn("version", data)
         self.assertEqual(data["status"], "running")
         self.assertIn("preset", data)
-        self.assertIn("embedding", data)
+        self.assertNotIn("embedding", data)  # side details live at /sides
         self.assertIn("vector_db", data)
         # Scalar library count (per-library breakdown lives at /api/libraries)
         self.assertIn("libraries_count", data["vector_db"])
@@ -298,6 +308,25 @@ class TestRootEndpoints(unittest.TestCase):
         # configured in the test environment the feature is disabled.
         self.assertIn("cron_indexing", data)
         self.assertIn("enabled", data["cron_indexing"])
+        plugins = {p["id"]: p for p in data["plugins"]}
+        self.assertTrue(plugins["core"]["builtin"])
+        self.assertEqual(plugins["testvendor"]["status"], "loaded")
+        self.assertIn("inference.provider:testvendor", plugins["testvendor"]["capabilities"])
+        kinds = {(c["kind"], c["id"]) for c in data["capabilities"]}
+        self.assertIn(("inference.provider", "generic"), kinds)
+        self.assertIn(("presets", "testvendor"), kinds)
+
+    def test_sides(self):
+        """GET /sides: one entry per side of the default preset, with what serves it."""
+        response = self.client.get("/sides")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("embedding", data["sides"])
+        self.assertIn("llm", data["sides"])
+        emb = data["sides"]["embedding"]
+        self.assertIn("model_name", emb)
+        self.assertIn("embedding_dim", emb)
+        self.assertIn("plugin", emb["served_by"])
 
     def test_health_check(self):
         """Test GET /health endpoint."""

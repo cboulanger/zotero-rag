@@ -55,7 +55,7 @@ class RerankConfigTest(unittest.TestCase):
     def test_vendor_without_rerank_support_rejected(self):
         preset = make_preset({
             "model_type": "remote", "model_name": "x",
-            "model_kwargs": {"api_key_env": "K"}, "provider": {"id": "kisski"},
+            "model_kwargs": {"api_key_env": "K"}, "provider": {"id": "testvendor"},
         })
         with self.assertRaisesRegex(ProviderConfigError, "does not support the rerank side"):
             get_providers(preset)

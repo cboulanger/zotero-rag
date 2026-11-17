@@ -44,7 +44,10 @@ def check_model_preset_valid() -> tuple[bool, Optional[str]]:
     from backend.config.presets import get_preset
 
     preset_name = os.getenv("MODEL_PRESET", "remote-kisski")
-    preset = get_preset(preset_name)
+    try:
+        preset = get_preset(preset_name)
+    except ValueError as exc:  # the preset's provider plugin is not loaded
+        return False, str(exc)
 
     if preset is None:
         return False, f"Invalid MODEL_PRESET: '{preset_name}' not found"

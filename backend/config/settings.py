@@ -182,6 +182,15 @@ class Settings(BaseSettings):
         description="Enable OCR for image-only pages (requires Tesseract). "
                     "Set to False when Tesseract is not installed or OCR is not needed."
     )
+    backend_plugin_dirs: str = Field(
+        default="",
+        description="Extra backend plugin directories, separated by os.pathsep (':' on Linux/macOS, "
+                    "';' on Windows), loaded after the shipped backend/plugins (docs/backend-plugins.md).",
+    )
+    disabled_backend_plugins: str = Field(
+        default="",
+        description="Comma-separated ids of backend plugins not to load (shipped or external).",
+    )
     kreuzberg_url: str = Field(
         default="http://localhost:8100",
         description="URL of the kreuzberg sidecar HTTP API. "

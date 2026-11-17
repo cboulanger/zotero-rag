@@ -668,6 +668,8 @@ called too early.
 
 - Use Python's built-in `unittest` framework
 - Test files should be named `test_*.py` and placed in a `tests/` directory
+- **Tests for a backend plugin ship with the plugin** in `backend/plugins/<id>/tests/` (or the external plugin's own `tests/`), never in `backend/tests`; they use `backend.providers.testing` (fakes, `ProviderContractSuite`) and `backend.pytest_plugin`, not `backend/tests` helpers. See `docs/backend-plugins.md`.
+- **Core tests (`backend/tests`) never depend on a shipped plugin**: they run on the test-only fake plugin in `backend/tests/fake_plugins/` (fake providers and `test-*` presets; helpers in `backend/tests/fakes.py`), and CI runs them again with every shipped plugin disabled.
 - Run tests with: `uv run pytest` (after installing pytest) or `uv run python -m unittest discover`
 - Aim for comprehensive coverage of all library methods and services
 - Write tests before or alongside implementation (TDD encouraged)

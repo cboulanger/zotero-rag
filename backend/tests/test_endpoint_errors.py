@@ -8,8 +8,8 @@ from openai import APIConnectionError, BadRequestError
 
 from backend.services import endpoint_errors
 from backend.services.embeddings import EmbeddingEndpointUnavailableError, RemoteEmbeddingService
-from backend.tests.test_provider_runpod import runpod_preset
-from backend.tests.test_providers_registry import make_preset
+from backend.tests.fakes import cloud_preset
+from backend.providers.testing import make_preset
 
 
 def _settings(preset):
@@ -24,12 +24,12 @@ def _bad_request(body="endpoint is paused"):
 
 
 class TestMessages(unittest.TestCase):
-    def test_runpod_hint_and_paused_state(self):
-        with patch("backend.config.settings.get_settings", return_value=_settings(runpod_preset())):
+    def test_provider_hint_and_paused_state(self):
+        with patch("backend.config.settings.get_settings", return_value=_settings(cloud_preset())):
             msg = endpoint_errors.unavailable_message("llm", "LLM down.", "paused")
         self.assertIn("LLM down.", msg)
         self.assertIn("paused", msg)
-        self.assertIn("Configure preset", msg)  # the RunPod provider's own advice
+        self.assertIn("Configure preset", msg)  # the provider's own advice
 
     def test_generic_provider_adds_no_vendor_text(self):
         with patch("backend.config.settings.get_settings", return_value=_settings(make_preset())):
@@ -45,7 +45,7 @@ class TestMessages(unittest.TestCase):
 
     def test_classify_uses_the_providers_rules(self):
         exc = MagicMock(status_code=409, body="ENDPOINT_PAUSED")
-        with patch("backend.config.settings.get_settings", return_value=_settings(runpod_preset())):
+        with patch("backend.config.settings.get_settings", return_value=_settings(cloud_preset())):
             self.assertEqual(endpoint_errors.classify_status_error("llm", exc), "paused")
             self.assertIsNone(endpoint_errors.classify_status_error("llm", MagicMock(status_code=500, body="x")))
         self.assertIsNone(endpoint_errors.classify_status_error("llm", MagicMock(status_code=None)))
@@ -53,7 +53,7 @@ class TestMessages(unittest.TestCase):
 
 class TestEmbeddingPausedIs400(unittest.IsolatedAsyncioTestCase):
     async def test_paused_400_becomes_endpoint_unavailable_not_a_per_item_error(self):
-        preset = runpod_preset()
+        preset = cloud_preset()
         preset.embedding.model_type = "remote"
         service = RemoteEmbeddingService(preset.embedding, api_key="k")
         client = MagicMock()
@@ -86,7 +86,7 @@ class TestLLMUnavailable(unittest.IsolatedAsyncioTestCase):
         from openai import APIConnectionError
         from backend.services.llm import LLMEndpointUnavailableError, RemoteLLMService
         from backend.tests.test_llm import _raw  # noqa: F401  (shared fixtures module import check)
-        preset = runpod_preset()
+        preset = cloud_preset()
         settings = MagicMock()
         settings.get_hardware_preset.return_value = preset
         settings.get_hardware_preset().llm.model_type = "remote"
@@ -96,7 +96,7 @@ class TestLLMUnavailable(unittest.IsolatedAsyncioTestCase):
         service.llm_config = preset.llm
         service._model_name = "m"
         service._provider = None
-        # A known URL and "not paused": no lookup reaches the real RunPod API.
+        # A known URL and "not paused": no lookup reaches the provider.
         service._resolved_base_url = "https://x/v1"
         service._openai_client = None
         service.api_key = "k"

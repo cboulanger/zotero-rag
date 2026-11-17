@@ -15,11 +15,12 @@ from unittest.mock import AsyncMock, patch
 
 from cryptography.fernet import Fernet
 
+from backend.config.presets import bundled_preset_path
 from backend.config.presets import HardwarePreset
 from backend.config.settings import get_settings
 from backend.providers import get_providers
-from backend.services import mpcdf_sessions
-from backend.services.mpcdf_sessions import EndpointCredentials, MpcdfSessions, user_key
+from backend.plugins.mpcdf import sessions as mpcdf_sessions
+from backend.plugins.mpcdf.sessions import EndpointCredentials, MpcdfSessions, user_key
 from backend.services.rerank import RerankerUnavailable, RerankRequest
 
 HAVE_LIB = mpcdf_sessions.available()
@@ -211,7 +212,7 @@ class MpcdfRerankProviderTest(unittest.TestCase):
         self.assertIsNone(d.provisioning.credential)
 
     def test_bundled_preset_is_per_user_on_every_side(self):
-        data = json.loads((Path(__file__).resolve().parents[1] / "config/default_presets/remote-mpcdf.json").read_text())
+        data = json.loads(bundled_preset_path("remote-mpcdf").read_text())
         preset = HardwarePreset.model_validate({"name": "remote-mpcdf", **data})
         providers = get_providers(preset)
         for side in ("embedding", "llm"):

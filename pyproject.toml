@@ -61,7 +61,7 @@ rag-index = "bin.index_libraries:main"
 rag-check-gold-index = "scripts.rag_check_gold_index:main"
 
 [tool.pytest.ini_options]
-testpaths = ["backend/tests"]
+testpaths = ["backend/tests", "backend/plugins"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"

@@ -4,7 +4,7 @@ Configuration presets optimized for different hardware scenarios. Each preset de
 
 ## How presets are stored
 
-Each preset is a JSON file under `<data_path>/presets/<name>.json` (e.g. `data/presets/remote-kisski.json` in a default local checkout) — not hardcoded in Python. The presets documented below ship as bundled defaults in `backend/config/default_presets/`. On every startup the backend **overwrites** the copy in `<data_path>/presets/` of each bundled preset whose content differs from the bundled file (logging a WARNING when it discards a local edit), and creates the ones that are missing. This means:
+Each preset is a JSON file under `<data_path>/presets/<name>.json` (e.g. `data/presets/remote-kisski.json` in a default local checkout) — not hardcoded in Python. The presets documented below ship as bundled defaults: the provider-free ones in `backend/config/default_presets/`, the others with the backend plugin whose provider they need, in `backend/plugins/<id>/presets/` (see [Backend plugins](backend-plugins.md)); a preset is only bundled while its plugin is loaded. On every startup the backend **overwrites** the copy in `<data_path>/presets/` of each bundled preset whose content differs from the bundled file (logging a WARNING when it discards a local edit), and creates the ones that are missing. This means:
 
 - **Customise by copying.** To change `top_k`, swap a model name, tune `batch_size`, etc., copy a bundled preset to a new file name (`data/presets/my-kisski.json`) and edit the copy; edits to a bundled preset's own file are lost at the next start. The copy shows up in `GET /api/config`'s `available_presets` (and the Zotero plugin's preset dropdown) right away. An already-running process picks up an edit of an existing file after a restart (an in-memory cache keeps a loaded preset's *content* fast to re-read — see `backend/config/presets.py`'s module docstring).
 - **Every preset carries an integer `version`** (the current schema version is `PRESET_SCHEMA_VERSION` in `backend/config/presets.py`; see the table below). A custom preset with a missing or older version, one that still uses a removed key, or one that selects a Claude model without the `anthropic` provider is loaded as usual but logs a WARNING once per process saying what to change.
@@ -38,6 +38,10 @@ Instruction-tuned embedding models expect a search query to be embedded as `Inst
 - **`""`:** queries are embedded bare.
 
 On the gold library this raised the share of questions whose source passage is among the first ten results from 0.67 to 0.74 (Docling) and 0.75 (Kreuzberg), measured on retrieval only (Hugging Face dataset `evaluations/retrieval-improvements-20261113`).
+
+### Local engine: `engine`
+
+A side with `"model_type": "local"` runs in the backend process on a local inference engine contributed by a [backend plugin](backend-plugins.md) (the shipped `local_torch` plugin provides `torch` for every side). `"engine": "<name>"` on the `embedding`, `llm` or `rerank` section picks one; unset, the best engine available on the machine is used. A preset naming an engine no loaded plugin provides fails when that side is first used.
 
 ### Preset schema versions
 
@@ -307,6 +311,7 @@ Without the section queries use the vector order. Fields:
 | `timeout_seconds` | `15` | Longest the step may take; after that the vector order is kept |
 | `model_kwargs` | `{}` | For `local`: extra `CrossEncoder` arguments. For `remote`: `base_url` and `api_key_env` |
 | `provider` | generic | The provider that serves a remote re-ranker; it must use scope `user` |
+| `engine` | best available | For `local`: the local inference engine (see below) |
 
 A re-ranker on the MPCDF service, on each user's own account:
 
@@ -614,4 +619,4 @@ Provider API keys are never read from `.env` or the server's environment. Where 
 
 The Hugging Face token for downloading gated *local* model weights (`HF_TOKEN`) is not a provider credential and stays an environment setting.
 
-See `data/presets/*.json` for each preset's actual configuration (or `backend/config/default_presets/*.json` for the bundled defaults before they're copied), and [backend/config/presets.py](../backend/config/presets.py) for the schema (`HardwarePreset`/`EmbeddingConfig`/`LLMConfig`/`RAGConfig`) and loader these files are validated against.
+See `data/presets/*.json` for each preset's actual configuration (or `backend/config/default_presets/*.json` and `backend/plugins/*/presets/*.json` for the bundled defaults before they're copied), and [backend/config/presets.py](../backend/config/presets.py) for the schema (`HardwarePreset`/`EmbeddingConfig`/`LLMConfig`/`RAGConfig`) and loader these files are validated against.

@@ -135,7 +135,7 @@ async def status(
 ) -> dict:
     """Return the live status of the auto-index cron run.
 
-    Unlike the ``/`` root endpoint (which exposes only ``enabled``), this
+    Unlike the unauthenticated ``/status`` route (which exposes only ``enabled``), this
     authenticated endpoint surfaces the number of registered keys and the last
     run's full progress: whether a run is currently ``running`` (or ``crashed``),
     per-slug counts, timestamps and any ``key_issues`` recorded during the run.

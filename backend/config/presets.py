@@ -121,6 +121,11 @@ class EmbeddingConfig(BaseModel):
         default_factory=ProviderConfig,
         description="Provider class serving this side (see backend.providers).",
     )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
+    )
 
 
 class LLMConfig(BaseModel):
@@ -136,6 +141,11 @@ class LLMConfig(BaseModel):
     provider: ProviderConfig = Field(
         default_factory=ProviderConfig,
         description="Provider class serving this side (see backend.providers).",
+    )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
     )
 
     @field_validator("model_names", mode="before")
@@ -197,7 +207,8 @@ class RerankConfig(BaseModel):
     pool before dedup and the per-document cap (see backend/services/rerank.py).
 
     A preset without this section has no re-ranking step. ``local`` runs the model
-    in the backend process (sentence-transformers ``CrossEncoder``); ``remote`` calls a
+    in the backend process with a local engine from a backend plugin (the shipped
+    ``local_torch`` plugin: a sentence-transformers ``CrossEncoder``); ``remote`` calls a
     ``/rerank`` endpoint served by the side's provider, which must use the ``user``
     credential scope (each user's own account).
     """
@@ -222,6 +233,11 @@ class RerankConfig(BaseModel):
     provider: ProviderConfig = Field(
         default_factory=ProviderConfig,
         description="Provider class serving a remote re-ranker (see backend.providers).",
+    )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
     )
 
 
@@ -293,16 +309,41 @@ def current_platform() -> str:
     return _platform_module.system().lower()
 
 
+def bundled_preset_files() -> list[Path]:
+    """The bundled preset files: core's own, then those of the loaded backend plugins.
+
+    Core ships only presets that need no plugin provider; a preset that needs a
+    vendor's provider comes with that vendor's plugin (a ``presets`` capability).
+    A file name that is already taken is skipped with a warning.
+    """
+    files = {p.name: p for p in sorted(DEFAULT_PRESETS_DIR.glob("*.json"))}
+    from backend.pluginhost import PresetDirectory, get_plugin_host
+
+    for cap in get_plugin_host().capabilities(PresetDirectory.kind):
+        for path in cap.files():
+            if path.name in files:
+                logger.warning("Preset %s of plugin %s duplicates a bundled preset; skipped", path.name, cap.plugin_id)
+                continue
+            files[path.name] = path
+    return list(files.values())
+
+
+def bundled_preset_path(name: str) -> Optional[Path]:
+    """The bundled source file of preset ``name`` (core or plugin), or None."""
+    return next((p for p in bundled_preset_files() if p.stem == name), None)
+
+
 def _bundled_names() -> set[str]:
-    """File names (``<name>.json``) of the presets shipped with the backend."""
-    return {p.name for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+    """File names (``<name>.json``) of the bundled presets (core and loaded plugins)."""
+    return {p.name for p in bundled_preset_files()}
 
 
 def ensure_default_presets(data_path: Path) -> None:
     """
     Seed <data_path>/presets/ with the bundled default preset files.
 
-    Every file under DEFAULT_PRESETS_DIR is written to the data directory
+    Every bundled preset (core's ``default_presets/`` and the ``presets``
+    directories of the loaded backend plugins) is written to the data directory
     unless the bytes already there are identical. A bundled-name file whose
     content differs (a local edit, or an older schema) is overwritten and a
     WARNING names it; customise a preset by copying it to a new file name.
@@ -318,7 +359,7 @@ def ensure_default_presets(data_path: Path) -> None:
 
     presets_dir = resolved / "presets"
     presets_dir.mkdir(parents=True, exist_ok=True)
-    for default_file in DEFAULT_PRESETS_DIR.glob("*.json"):
+    for default_file in bundled_preset_files():
         target = presets_dir / default_file.name
         content = default_file.read_bytes()
         if target.exists():
