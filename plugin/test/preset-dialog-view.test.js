@@ -746,6 +746,30 @@ test('Billing: the account card paints a Billing section with the visible fields
 	assert.doesNotMatch(painted, /per 1M tokens/);
 });
 
+test('Billing: the section is collapsed by default, names the chosen type, and stays open across repaints', () => {
+	const D = load();
+	const doc = fakeDoc();
+	const refs = D.mount(doc, createElementNS(null, 'div'));
+	const billing = billingFields();
+	billing[0].value = 'Time-based';
+	const v = view([side('llm')], [card({ billing })]);
+	const local = { tab: '', logOpen: {}, drafts: {}, notes: {} };
+	const handlers = { onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} };
+	const all = (/** @type {any} */ node) => [node, ...(node.children || []).filter((/** @type {any} */ c) => typeof c === 'object').flatMap(all)];
+	const section = () => all(refs.cards).find((/** @type {any} */ n) => n.tag === 'details');
+	D.paint(doc, refs, v, local, handlers);
+	assert.ok(section(), 'Billing is a collapsible <details> section');
+	assert.strictEqual(section().open, false, 'collapsed by default');
+	const summary = section().children.find((/** @type {any} */ n) => n.tag === 'summary');
+	assert.match(summary.textContent, /Billing/);
+	assert.match(summary.textContent, /Time-based/, 'the collapsed heading still says how the service bills');
+	// The user opens it; a repaint (e.g. after a field is saved) keeps it open.
+	section().open = true;
+	section().listeners.toggle.forEach((/** @type {Function} */ fn) => fn({}));
+	D.paint(doc, refs, v, local, handlers);
+	assert.strictEqual(section().open, true);
+});
+
 test('Billing: choosing a type saves it in the Zotero preferences at once', async () => {
 	const billing = billingFields();
 	const { controller, prefs } = setup({ views: [view([side('llm')], [card({ billing })])] });

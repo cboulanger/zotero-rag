@@ -95,6 +95,7 @@
  * @typedef {Object} LocalState - what the dialog keeps between refreshes
  * @property {string} tab
  * @property {Record<string, boolean>} logOpen
+ * @property {Record<string, boolean>} [billingOpen] - account card ids whose Billing section is expanded
  * @property {Record<string, string>} drafts
  * @property {Record<string, {level: string, text: string}>} notes
  * @property {StandinList|null} [standins]
@@ -830,13 +831,21 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 	const billing = card.billing || [];
 	if (billing.length) {
 		// Saved as soon as changed (Zotero preferences): not part of the card's Save button.
-		const box = el('div', 'pd-billing');
-		const heading = el('div', 'pd-billing-head');
-		heading.textContent = 'Billing';
-		box.appendChild(heading);
+		// Collapsed until opened, since it is only needed while setting up; the heading still
+		// names the billing type. The open state survives repaints (a saved field repaints).
+		const box = /** @type {HTMLDetailsElement} */ (el('details', 'pd-billing'));
+		box.open = !!local.billingOpen?.[card.id];
+		box.addEventListener('toggle', () => {
+			local.billingOpen = { ...local.billingOpen, [card.id]: box.open };
+		});
+		const heading = el('summary', 'pd-billing-head');
+		const mode = billing.find((f) => f.type === 'select');
+		heading.textContent = mode?.value ? `Billing: ${mode.value}` : 'Billing';
+		const body = el('div', 'pd-billing-body');
 		for (const field of billing) {
-			if (this.isShown(field, billing)) box.appendChild(this._field(doc, field, scope, local, handlers));
+			if (this.isShown(field, billing)) body.appendChild(this._field(doc, field, scope, local, handlers));
 		}
+		box.append(heading, body);
 		node.appendChild(box);
 	}
 	const note = local.notes[scope];
@@ -890,7 +899,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	/** Refreshes while something is starting, after which polling stops (about 10 minutes). */
 	const MAX_POLLS = 120;
 	/** @type {{view: PresetView|null, local: LocalState}} */
-	const state = { view: null, local: { tab: '', logOpen: {}, drafts: {}, notes: {}, standins: null, running: {} } };
+	const state = { view: null, local: { tab: '', logOpen: {}, billingOpen: {}, drafts: {}, notes: {}, standins: null, running: {} } };
 	let polling = false;
 	// The stand-ins are offered by themselves once per dialog, the first time a side shows
 	// a used-up quota; afterwards only the side's button asks again.
