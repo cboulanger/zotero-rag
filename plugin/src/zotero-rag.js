@@ -482,6 +482,9 @@ class ZoteroRAGPlugin {
 				attributes: {
 					label: 'Zotero RAG: Ask Question...',
 					image: iconURL,
+					// Zotero 11 (Firefox 153) renders menu icons as <html:img> driven by
+					// --menuitem-icon; `image` still covers Zotero 7-10.
+					style: `--menuitem-icon: url("${iconURL}")`,
 				},
 				listeners: [{ type: 'command', listener: async () => this.openQueryDialog(window) }],
 			});

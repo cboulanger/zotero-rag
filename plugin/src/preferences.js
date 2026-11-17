@@ -1,7 +1,7 @@
-// Preferences pane logic — called via onload in preferences.xhtml
+// Preferences pane logic — called from preferences-pane.js on the pane's load event
 
 /**
- * Initialize the preferences pane. Called by the XUL onload attribute.
+ * Initialize the preferences pane. Called by preferences-pane.js on the pane's load event.
  * ZoteroRAG is already loaded in the global scope by bootstrap.js.
  * @param {Window} _window
  */
