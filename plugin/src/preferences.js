@@ -624,8 +624,9 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		});
 	}
 
-	// Indexed-status tags: opt-in real-time tagging (polled by IndexedTags) plus a
-	// manual full reconciliation that reuses the key stored for automatic indexing.
+	// Indexed-status tags: opt-in real-time tagging (polled by IndexedTags) plus a full
+	// reconciliation (run daily by IndexedTags, or now via this button) that reuses the
+	// key stored for automatic indexing.
 	const indexedTagsToggle = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-toggle'));
 	const indexedTagsRefresh = /** @type {HTMLButtonElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-refresh'));
 	const indexedTagsStatus = doc.getElementById('zotero-rag-indexed-tags-status');
