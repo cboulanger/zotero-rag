@@ -464,12 +464,14 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Add plugin UI elements to a window.
+	 * Add plugin UI elements to a window. Does nothing for a window that already has them:
+	 * startup() adds to every open window and Zotero's onMainWindowLoad can follow for the same one.
 	 * @param {Window} window - Zotero window
 	 * @returns {void}
 	 */
 	addToWindow(window) {
 		let doc = window.document;
+		if (doc.getElementById('zotero-rag-ask-question')) return;
 		const iconURL = `chrome://zotero-rag/content/icons/ask-rag.svg`;
 		const ui = this.toolkit.uiTool;
 

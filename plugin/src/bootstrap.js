@@ -86,11 +86,16 @@ async function startup({ id, version, rootURI }) {
 	await ZoteroRAG.main();
 }
 
+// Zotero can call these before startup() has run: it loads the plugin scope, awaits locale
+// registration and only then calls startup(), and a main window may finish loading in between.
+// startup() adds the UI to every main window open by then, so skipping here loses nothing.
 function onMainWindowLoad({ window }) {
+	if (!ZoteroRAG) return;
 	ZoteroRAG.addToWindow(window);
 }
 
 function onMainWindowUnload({ window }) {
+	if (!ZoteroRAG) return;
 	ZoteroRAG.removeFromWindow(window);
 }
 
