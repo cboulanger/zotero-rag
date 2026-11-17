@@ -29,12 +29,12 @@ class WarmupApiTest(unittest.TestCase):
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
 
-    def _post(self, statuses):
+    def _post(self, statuses, waking=()):
         ident = ZoteroIdentity(user_id=5, username="u", targets=["users/5"])
 
         def check(preset, side, request=None):
             status = statuses.get(side)
-            return None if status is None else config_api.EndpointHealth(status=status, detail="")
+            return None if status is None else config_api.EndpointHealth(status=status, detail="", waking=side in waking)
 
         with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=ident)), \
              patch.object(config_api, "_check_side", side_effect=check), \
@@ -47,6 +47,11 @@ class WarmupApiTest(unittest.TestCase):
         warming, send = self._post({"embedding": "ready", "llm": "cold"})
         self.assertEqual(warming, ["llm"])
         self.assertEqual([c.args[0] for c in send.call_args_list], ["llm"])
+
+    def test_sides_already_starting_up_are_left_alone(self):
+        warming, send = self._post({"embedding": "cold", "llm": "cold"}, waking=("llm",))
+        self.assertEqual(warming, ["embedding"])
+        self.assertEqual([c.args[0] for c in send.call_args_list], ["embedding"])
 
     def test_paused_or_unreachable_sides_are_left_alone(self):
         warming, send = self._post({"embedding": "paused", "llm": "unreachable"})

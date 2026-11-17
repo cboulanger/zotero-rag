@@ -587,3 +587,119 @@ test('Start all that ends with a failed side says so in the header and shows tha
 	assert.strictEqual(header.level, 'error');
 	assert.match(header.text, /llm.*Last job failed: no capacity/);
 });
+
+// -- buttons while their action runs (issue #117) ---------------------------------------
+
+/** A post that stays open until `release()` is called. */
+function heldPost() {
+	const posts = [];
+	let release;
+	const done = new Promise((resolve) => { release = resolve; });
+	return { posts, release: () => release(), post: async (p, body) => { posts.push([p, body]); await done; return { ok: true, status: 202, data: {} }; } };
+}
+
+test('while an action runs it is tracked as running, a second click sends nothing, and it is released afterwards', async () => {
+	const v = view([side('llm', { state: 'down', actions: [start('llm')] })]);
+	const held = heldPost();
+	const running = [];
+	const { controller } = setup({ views: [v], extra: { post: held.post, paint: (_v, local) => running.push(Object.keys(local.running || {})) } });
+	await controller.refresh();
+	const first = controller.runAction('llm', v.sides[0].actions[0]);
+	await new Promise((r) => setImmediate(r));
+	assert.deepStrictEqual(Object.keys(controller.state.local.running), ['side:llm/start']);
+	await controller.runAction('llm', v.sides[0].actions[0]);
+	await controller.runWorkflow('start');
+	assert.strictEqual(held.posts.length, 1, 'clicks while it runs do nothing');
+	held.release();
+	await first;
+	assert.deepStrictEqual(Object.keys(controller.state.local.running), []);
+	assert.ok(running.some((keys) => keys.includes('side:llm/start')), 'a paint showed it running');
+});
+
+test('Start all, Save and log in are tracked under their own buttons while their requests run', async () => {
+	const v = view([side('embedding', { state: 'down', actions: [start('embedding')] })]);
+	const cases = [
+		['header/start', (c) => c.runWorkflow('start')],
+		['account:p1/save', (c) => { c.state.local.drafts['account:p1/P1_KEY'] = 'k'; return c.saveAccount(card()); }],
+		['account:p1/login', (c) => c.runCardAction(card(), { id: 'login', label: 'Log in', kind: 'primary', enabled: true, reason: '', request: { method: 'POST', path: '/api/x/login', body: {} } })],
+	];
+	for (const [key, act] of cases) {
+		const held = heldPost();
+		const { controller } = setup({ views: [v], extra: { post: held.post } });
+		await controller.refresh();
+		const pending = act(controller);
+		await new Promise((r) => setImmediate(r));
+		assert.deepStrictEqual(Object.keys(controller.state.local.running), [key], key);
+		held.release();
+		await pending;
+		assert.deepStrictEqual(Object.keys(controller.state.local.running), [], key);
+	}
+});
+
+test('Check now shows its spinner for one refresh and does not fetch twice', async () => {
+	const v = view([side('llm')]);
+	let fetches = 0;
+	const seen = [];
+	const { controller } = setup({ views: [v], extra: {
+		get: async () => { fetches++; seen.push(Object.keys(controller.state.local.running)); return v; },
+	} });
+	await controller.checkNow();
+	assert.strictEqual(fetches, 1);
+	assert.deepStrictEqual(seen, [['header/check']]);
+	assert.deepStrictEqual(Object.keys(controller.state.local.running), []);
+});
+
+test('the running action\'s button shows a spinner and every action button is disabled meanwhile', () => {
+	const D = load();
+	const doc = fakeDoc();
+	const refs = D.mount(doc, createElementNS(null, 'div'));
+	const v = view([side('llm', { state: 'down', actions: [start('llm'), pause('llm')] })], [card({ auto_start: false })]);
+	const local = { tab: '', logOpen: {}, drafts: { 'account:p1/P1_KEY': 'k' }, notes: {}, running: { 'side:llm/start': true } };
+	const handlers = { onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} };
+	D.paint(doc, refs, v, local, handlers);
+	const all = (node) => [node, ...(node.children || []).filter((c) => typeof c === 'object').flatMap(all)];
+	const buttons = all(refs.panel).filter((n) => n.tag === 'button' && /pd-button/.test(n.className));
+	const [startButton, pauseButton] = buttons;
+	assert.match(startButton.className, /pd-busy/);
+	assert.strictEqual(startButton.attrs['aria-busy'], 'true');
+	assert.strictEqual(startButton.disabled, true);
+	assert.doesNotMatch(pauseButton.className, /pd-busy/);
+	assert.strictEqual(pauseButton.disabled, true);
+	assert.strictEqual(refs.startAll.disabled, true);
+	assert.strictEqual(refs.checkNow.disabled, true);
+	const save = all(refs.cards).find((n) => n.tag === 'button' && n.textContent === 'Save');
+	assert.strictEqual(save.disabled, true);
+
+	// Once it is done, the buttons are back, without spinner.
+	local.running = {};
+	D.paint(doc, refs, v, local, handlers);
+	const after = all(refs.panel).filter((n) => n.tag === 'button' && /pd-button/.test(n.className));
+	assert.doesNotMatch(after[0].className, /pd-busy/);
+	assert.strictEqual(after[0].disabled, false);
+	assert.strictEqual(refs.checkNow.disabled, false);
+	assert.strictEqual(all(refs.cards).find((n) => n.tag === 'button' && n.textContent === 'Save').disabled, false);
+});
+
+test('a clicked (focused) Save button still shows its spinner; a focused text field keeps the card as typed', () => {
+	const D = load();
+	const doc = fakeDoc();
+	const refs = D.mount(doc, createElementNS(null, 'div'));
+	const v = view([side('llm')], [card({ auto_start: false })]);
+	const local = { tab: '', logOpen: {}, drafts: { 'account:p1/P1_KEY': 'k' }, notes: {}, running: {} };
+	const handlers = { onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} };
+	D.paint(doc, refs, v, local, handlers);
+	const all = (node) => [node, ...(node.children || []).filter((c) => typeof c === 'object').flatMap(all)];
+	const save = all(refs.cards).find((n) => n.tag === 'button' && n.textContent === 'Save');
+	refs.cards.contains = (node) => all(refs.cards).includes(node);
+	doc.activeElement = save;
+	local.running = { 'account:p1/save': true };
+	D.paint(doc, refs, v, local, handlers);
+	const repainted = all(refs.cards).find((n) => n.tag === 'button' && n.textContent === 'Save');
+	assert.notStrictEqual(repainted, save, 'the card was rebuilt');
+	assert.match(repainted.className, /pd-busy/);
+
+	const input = all(refs.cards).find((n) => n.tag === 'input');
+	doc.activeElement = input;
+	D.paint(doc, refs, v, local, handlers);
+	assert.strictEqual(all(refs.cards).find((n) => n.tag === 'input'), input, 'typing is not interrupted');
+});
