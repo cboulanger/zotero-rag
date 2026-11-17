@@ -1,3 +1,57 @@
+# [1.63.0](https://github.com/cboulanger/zotero-rag/compare/v1.62.0...v1.63.0) (2026-11-17)
+
+
+### Bug Fixes
+
+* **extraction:** switch the sidecar to ghcr.io/xberg-io/xberg ([#43](https://github.com/cboulanger/zotero-rag/issues/43)) ([fbc25a3](https://github.com/cboulanger/zotero-rag/commit/fbc25a310b5f15229eb72b207a2148a0d483f881))
+* **mpcdf:** run embedding and re-ranking on the vLLM 0.11.2 image with FlexAttention ([#112](https://github.com/cboulanger/zotero-rag/issues/112)) ([e664f3f](https://github.com/cboulanger/zotero-rag/commit/e664f3fb0e8b5d6d95c7f066b8ee2059d2378701)), closes [#111](https://github.com/cboulanger/zotero-rag/issues/111) [#111](https://github.com/cboulanger/zotero-rag/issues/111) [#111](https://github.com/cboulanger/zotero-rag/issues/111)
+* **plugin:** keep Preferences' endpoint dots in step with Configure preset ([6b9330c](https://github.com/cboulanger/zotero-rag/commit/6b9330c54a09aa0d287468da744ce92a0ce7eaa2))
+* **plugin:** offer a stand-in when the query dialog opens, whatever the health check says ([72b3f64](https://github.com/cboulanger/zotero-rag/commit/72b3f64fc47c09c03baa1ac7219c0e82e5097d39))
+* **plugin:** re-send only to a ready stand-in, offer it on follow-ups and in Preferences ([b092ff3](https://github.com/cboulanger/zotero-rag/commit/b092ff360b19a78702d017ff68234b351629a395))
+* **plugin:** run the Preferences pane's init on its load event again ([c8bcfb8](https://github.com/cboulanger/zotero-rag/commit/c8bcfb8e01d38e4951d03c879db19dc0fd80b98b))
+* **plugin:** say when Start all or Pause all fails on a side ([a58a652](https://github.com/cboulanger/zotero-rag/commit/a58a652e96cda2cd13fbe1cebe6e2c0be450404a))
+* **plugin:** say why the Configure preset dialog could not load ([c7c124a](https://github.com/cboulanger/zotero-rag/commit/c7c124a9eef514d250152f75260684b208ab2206))
+* **plugin:** skip onMainWindowLoad before startup has run ([cbcc372](https://github.com/cboulanger/zotero-rag/commit/cbcc3724759145b6d53327fb350981d7e2426e29))
+* **plugin:** the query dialog follows the endpoints while it is open ([291cead](https://github.com/cboulanger/zotero-rag/commit/291cead2b150addfd37eb03efe50291e8547fa8f))
+* **plugin:** wait for a library's item data before reading indexed tags ([072298c](https://github.com/cboulanger/zotero-rag/commit/072298c78ab91da657117e39be0149a0db136218))
+* **retrieval:** ignore chat preambles in the translation and bound its wait to 10 s ([05b27ec](https://github.com/cboulanger/zotero-rag/commit/05b27ec4a197fc83c0c86fc6dcef36d6abd2cd3e))
+* **retrieval:** rescore each search's own top passages when a question is translated ([417a0bf](https://github.com/cboulanger/zotero-rag/commit/417a0bf9a6fbce5373432d07688f21c16eb18222))
+* **runpod:** move endpoint management to RunPod's REST API v2 ([7dc09c4](https://github.com/cboulanger/zotero-rag/commit/7dc09c4b68fdad332b0b502fdeddb11a8a08f924))
+* **standin:** honour a default-equal stand-in, drop stand-in models, unblock loop ([cafab50](https://github.com/cboulanger/zotero-rag/commit/cafab500861bc88d4aa7669e1962bf94e47bc948))
+* **standin:** keep the user's own keys while a stand-in is active ([89db1f1](https://github.com/cboulanger/zotero-rag/commit/89db1f19d67a08ea24fee59108a558f5b585da12))
+* **standin:** neutral null-offer note, UTC in the button, keep a pending retry ([e8494b1](https://github.com/cboulanger/zotero-rag/commit/e8494b1886ce2f1847e7bf0a1366b2bb486027c7))
+* **standin:** offer stand-ins when Configure preset opens; Save waits for input ([b6f80a1](https://github.com/cboulanger/zotero-rag/commit/b6f80a13bf3897106310667326e32be9174072b6))
+* **standin:** start a ready stand-in's endpoints with the switch ([c32980a](https://github.com/cboulanger/zotero-rag/commit/c32980aff436736656bbb2e09062a4c5f68a9f50))
+* use an answering model the caller's key can access ([d02e8af](https://github.com/cboulanger/zotero-rag/commit/d02e8af7f8386bc133265cc211c98f8346a3a4bc))
+
+
+### Features
+
+* add near-duplicate removal and query decomposition retrieval prototypes (off by default) ([1ca24f6](https://github.com/cboulanger/zotero-rag/commit/1ca24f6f413faa18be8bb1a075740567f0611853)), closes [#87](https://github.com/cboulanger/zotero-rag/issues/87) [#90](https://github.com/cboulanger/zotero-rag/issues/90)
+* **config:** choose and end a temporary stand-in ([3cd34d6](https://github.com/cboulanger/zotero-rag/commit/3cd34d6e21573a825163b05fe163f71852626b74))
+* **plugin:** collapse a service account's credentials once complete ([8489e85](https://github.com/cboulanger/zotero-rag/commit/8489e85576988ca60319813e878afa825988ef1e))
+* **plugin:** collapse the Billing section of a service account card ([4203f59](https://github.com/cboulanger/zotero-rag/commit/4203f5984dae18913034eba21c8d320595fab1ed))
+* **plugin:** move model configuration into a Configure preset dialog ([e9713ce](https://github.com/cboulanger/zotero-rag/commit/e9713cec23b26b353730159d0d06d6ae46c20429))
+* **plugin:** move model configuration into a Configure preset dialog ([#110](https://github.com/cboulanger/zotero-rag/issues/110)) ([b301ec9](https://github.com/cboulanger/zotero-rag/commit/b301ec9c40d68fd8ad8c9cad9ec889ebcc2944f0))
+* **plugin:** offer a stand-in preset when a quota is exhausted ([34914af](https://github.com/cboulanger/zotero-rag/commit/34914afd9865a2bdd1cdfca10f639852c280fe65))
+* **plugin:** offer stand-ins when the dialogs find an exhausted quota ([7a8c884](https://github.com/cboulanger/zotero-rag/commit/7a8c884d9c05a80b88c9782b30098d84c8b7478c))
+* **plugin:** Re-ranking tab and account login in the Configure preset dialog ([e6d49a8](https://github.com/cboulanger/zotero-rag/commit/e6d49a81e5a53d782d77c5a31954ecc3ad025372)), closes [#107](https://github.com/cboulanger/zotero-rag/issues/107)
+* **presets:** declare a cost class per provider and stand-in fields per preset ([c26f994](https://github.com/cboulanger/zotero-rag/commit/c26f994443abb28cc0d72d9b03df8d28d47c6d84))
+* **presets:** make gemma-4-31b-it the default answering model on KISSKI ([1109a0b](https://github.com/cboulanger/zotero-rag/commit/1109a0bc7328b80de0c6d819856ab640093c0415))
+* **query:** offer stand-ins when a provider's quota is exhausted ([3652fc0](https://github.com/cboulanger/zotero-rag/commit/3652fc0f1f8bcf9ce82c25b4748b90892aad5f2a))
+* **rerank:** scale the re-ranking pool with library size and make it configurable ([10983a7](https://github.com/cboulanger/zotero-rag/commit/10983a72b82ffd6ff76c60095aac0c899dd6f4c9))
+* **rerank:** score passages against every question variant ([2d925dc](https://github.com/cboulanger/zotero-rag/commit/2d925dcfa577669f2e13c24cd7f0e6dfa291b24a))
+* **retrieval:** embed search queries with the model's task instruction ([a53f624](https://github.com/cboulanger/zotero-rag/commit/a53f624be59d9c044b8af85cf6c89d2eb71fb50e))
+* **retrieval:** enable query translation by default ([06c1883](https://github.com/cboulanger/zotero-rag/commit/06c18830a7209b79a7df7a766572e7fbd043f5f6))
+* **retrieval:** search and re-rank with the English translation of non-English questions ([b303df3](https://github.com/cboulanger/zotero-rag/commit/b303df390a6d51e97cd821e030bfcb09c8991c3d))
+* **retrieval:** translate non-English questions into English (module, off by default) ([ceb358c](https://github.com/cboulanger/zotero-rag/commit/ceb358cef57470e6cffe9b235ee44382aed1e9c8))
+* **runpod:** optional endpoint name and LLM context length per preset side ([9f96797](https://github.com/cboulanger/zotero-rag/commit/9f967973bb7886fe2c2ffefd1cd3c3c154102a98))
+* **standin:** derive and rank stand-in presets ([02b294c](https://github.com/cboulanger/zotero-rag/commit/02b294caace974563019f0244ac3a585412588a0))
+* **standin:** offer stand-ins on request and report exhausted quotas in the preset view ([aa88232](https://github.com/cboulanger/zotero-rag/commit/aa882327d84695d6428fe9e49a96e98dbc3acf23))
+* **standin:** store a temporary stand-in and apply it to queries only ([c919af0](https://github.com/cboulanger/zotero-rag/commit/c919af0816217bc2340e1c2f3f6ddd99ed5c0707))
+* start re-ranking on login and check the pipeline when the query dialog opens ([f3058f8](https://github.com/cboulanger/zotero-rag/commit/f3058f8e62d85b48048ff9caa6cc7c32b722ec49))
+* test-request status, quota and model demand in Configure preset ([4d9afd9](https://github.com/cboulanger/zotero-rag/commit/4d9afd9f92b76ddf28f3b2c3d6b3a64ae5c355fc))
+
 # [1.62.0](https://github.com/cboulanger/zotero-rag/compare/v1.61.0...v1.62.0) (2026-10-23)
 
 
