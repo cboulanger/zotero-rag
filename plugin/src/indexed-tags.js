@@ -208,7 +208,11 @@ var IndexedTags = {
 	 */
 	async setTagged(item, tagged, tag = this.tag) {
 		if (!item || !item.isAttachment || !item.isAttachment()) return 'skipped';
-		if (!Zotero.Libraries.get(item.libraryID)?.editable) return 'skipped';
+		const library = Zotero.Libraries.get(item.libraryID);
+		if (!library?.editable) return 'skipped';
+		// Shortly after startup a library's item data (tags included) may not be loaded yet,
+		// and hasTag() would throw UnloadedDataException. Returns at once once it is loaded.
+		await library.waitForDataLoad('item');
 		const has = item.hasTag(tag);
 		if (has === tagged) return 'unchanged';
 		if (tagged) item.addTag(tag, 1);
@@ -285,12 +289,13 @@ var IndexedTags = {
 			if (ev.type === 'failed' || ev.type === 'unfailed') {
 				this.appliedSeq.set(id, ev.seq);
 				const item = /** @type {any} */ (Zotero.Items.getByLibraryAndKey(libraryID, key));
-				await this.setTagged(item, ev.type === 'failed', this.failedTag);
+				const outcome = await this.setTagged(item, ev.type === 'failed', this.failedTag);
 				// A quarantined attachment usually has no chunks; a leftover indexed tag
 				// would make it look fine. Queue the usual settled + confirmed removal
 				// (a later `indexed` event cancels it; the check keeps a tag that is right).
+				// Not for a skipped item: its tags are never written, and its data may be unloaded.
 				const indexedId = `${libraryID}/${key}`;
-				if (ev.type === 'failed' && item && item.hasTag?.(this.tag) && latest.get(indexedId)?.type !== 'indexed') {
+				if (ev.type === 'failed' && outcome !== 'skipped' && item.hasTag(this.tag) && latest.get(indexedId)?.type !== 'indexed') {
 					this.pendingRemovals.set(indexedId, { libraryID, key, due: now + this.REMOVE_SETTLE_MS });
 				}
 				continue;

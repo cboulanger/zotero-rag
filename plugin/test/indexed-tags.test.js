@@ -38,16 +38,16 @@ function makeItem(key, { tagged = false, attachment = true, libraryID = 1 } = {}
 }
 
 /**
- * @param {{items?: any[], indexedOnBackend?: string[], editable?: boolean, prefs?: Record<string, any>, responses?: Record<string, any>}} [o]
+ * @param {{items?: any[], indexedOnBackend?: string[], editable?: boolean, library?: any, prefs?: Record<string, any>, responses?: Record<string, any>}} [o]
  */
-function setup({ items = [], indexedOnBackend = [], editable = true, prefs = {}, responses = {} } = {}) {
+function setup({ items = [], indexedOnBackend = [], editable = true, library = null, prefs = {}, responses = {} } = {}) {
 	const byKey = new Map(items.map(i => [i.key, i]));
 	const stored = { ...prefs };
 	/** @type {Array<{url: string, init: any}>} */
 	const calls = [];
 	const zotero = {
 		Prefs: { get: (/** @type {string} */ k) => stored[k], set: (/** @type {string} */ k, /** @type {any} */ v) => { stored[k] = v; } },
-		Libraries: { userLibraryID: 1, get: () => ({ editable }) },
+		Libraries: { userLibraryID: 1, get: () => library || { editable, waitForDataLoad: async () => {} } },
 		Groups: { get: (/** @type {number} */ id) => (id === 77 ? { libraryID: 5 } : null) },
 		Items: { getByLibraryAndKey: (/** @type {number} */ _l, /** @type {string} */ k) => byKey.get(k) || false, get: (/** @type {number[]} */ ids) => ids.map(i => items[i]) },
 		Tags: { getID: () => 9, getTagItems: async () => items.map((_, i) => i) },
@@ -94,6 +94,25 @@ test('setTagged adds an automatic tag once and is idempotent', async () => {
 test('setTagged skips non-attachments and read-only libraries', async () => {
 	assert.strictEqual(await setup().T.setTagged(makeItem('N', { attachment: false }), true), 'skipped');
 	assert.strictEqual(await setup({ editable: false }).T.setTagged(makeItem('A'), true), 'skipped');
+});
+
+test('setTagged waits for the library\'s item data before reading tags', async () => {
+	// At startup Zotero has not loaded every library's item data yet; reading tags then
+	// throws UnloadedDataException until the library's data load has run.
+	const state = { loaded: false, waits: /** @type {string[]} */ ([]) };
+	const library = {
+		editable: true,
+		async waitForDataLoad(/** @type {string} */ type) { state.waits.push(type); state.loaded = true; },
+	};
+	const item = makeItem('A');
+	const hasTag = item.hasTag;
+	item.hasTag = (/** @type {string} */ t) => {
+		if (!state.loaded) throw new Error(`Item ${item.key} not yet loaded`);
+		return hasTag(t);
+	};
+	const { T } = setup({ library });
+	assert.strictEqual(await T.setTagged(item, true), 'changed');
+	deepEq(state.waits, ['item']);
 });
 
 test('indexed event tags immediately; unindexed is deferred then confirmed against the backend', async () => {
