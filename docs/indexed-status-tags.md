@@ -9,7 +9,7 @@ The tag is a plain *automatic* tag (type 1) — not a colored tag, which would c
 one of the nine library-wide, synced colored-tag slots. Consequences to be aware of:
 
 - Zotero's "Delete Automatic Tags in This Library" also deletes this tag. A Refresh
-  (below) restores it.
+  (below, also run automatically once a day) restores it.
 - In a group library the tag is item data, so it syncs to, and is visible to, every
   member. It is only written where the local library is editable.
 - The feature is opt-in: Preferences → *Indexed-status tags* → "Keep indexed-status
@@ -44,11 +44,14 @@ polled event log:
    every 15 s, filtered to libraries the caller can read. First contact (no cursor)
    follows from the current log head; the cursor is stored in a pref so events from
    while Zotero was closed are applied on the next start. `gap: true` means events
-   were rotated away — run Refresh.
+   were rotated away; the plugin then runs a Refresh on its own (see "Automatic
+   reconciliation").
 3. `indexed` adds the tag at once. `unindexed` is held for two minutes and then
    re-confirmed with `POST /api/indexed-tags/check` before the tag is removed, so a
    re-index (which deletes an attachment's chunks before re-adding them) does not
-   flap the tag. Tag writes use `saveTx({ skipDateModifiedUpdate: true })` and are
+   flap the tag. A `failed` event adds the rag-failed tag and, if the attachment
+   still carries the indexed tag, queues the same settled, confirmed removal for it, so
+   a quarantined attachment without chunks does not keep looking indexed. Tag writes use `saveTx({ skipDateModifiedUpdate: true })` and are
    skipped when the item already has the desired state.
 
 Events not emitted: `VectorStore.delete_chunks_by_ids` called directly (used by
@@ -56,7 +59,8 @@ Events not emitted: `VectorStore.delete_chunks_by_ids` called directly (used by
 
 ## Refresh path
 
-Preferences → *Indexed-status tags* → **Refresh indexed-status tags**.
+Preferences → *Indexed-status tags* → **Refresh indexed-status tags**, or started by
+the plugin itself (next section).
 
 1. `POST /api/indexed-tags/refresh` spawns `bin/sync_indexed_tags.py --fingerprint <fp>`
    as a detached subprocess (as `POST /api/autoindex/run` does for the indexer), using
@@ -78,6 +82,29 @@ rejected at submission), so the script plans and the plugin — which owns the l
 library and syncs it — applies. Because the plan is computed against the web API's
 view, a tag the plugin just wrote but Zotero has not yet synced is planned again on
 the next Refresh; the plugin's apply step is idempotent, so that is a no-op.
+
+### Automatic reconciliation
+
+The real-time path only sees events that happen while the plugin is polling, and some
+changes emit no event at all (direct chunk deletes, tags edited by hand or by another
+group member's plugin). So the plugin also starts the Refresh above by itself, in the
+background, from its poll loop:
+
+- on first contact (no cursor yet, or the feature was just switched on), because
+  following from the log head skips history;
+- when an events response reports `gap: true`;
+- whenever the last completed Refresh (manual or automatic, pref
+  `extensions.zotero-rag.indexedTags.lastRefresh`) is older than
+  `extensions.zotero-rag.indexedTags.autoRefreshHours` hours (default 24; `0` turns
+  automatic runs off, the button keeps working).
+
+Only one automatic run is in flight at a time, and the real-time poll keeps running
+alongside it. A run that fails (backend unreachable, or no key stored for automatic
+indexing, which Refresh reuses) is retried an hour later rather than on every poll.
+
+The backend does not run reconciliation on its own schedule (e.g. from the cron
+indexer): it can compute the plan, but only the plugin can write the tags, so a plan
+nobody applies would be wasted work.
 
 ### Not racing the real-time path
 
@@ -163,7 +190,7 @@ queue entry and marks the item as not indexed, so the next scan or upload picks 
 again. Transitions reach the plugin as `failed` / `unfailed` events (with the
 `failed_tag` name in every events/refresh response); Refresh also reconciles the tag
 (`ops` records with `kind: "failed"`). A removal that could not be reported to the
-backend (e.g. offline) is undone by the next Refresh.
+backend (e.g. offline) is undone by the next Refresh, manual or automatic.
 
 ## Known cost: standalone attachments
 
