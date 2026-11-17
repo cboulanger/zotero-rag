@@ -462,7 +462,8 @@ class HuggingFaceProvider(Provider):
         detail = (endpoint.get("status") or {}).get("message") or "" if status != "ready" else ""
         if status == "cold" and state == "scaledToZero":
             detail = "scaled to zero; wakes on the next request"
-        return Health(status=status, detail=detail or state)
+        # Only a scaled-to-zero endpoint waits for a request; the other cold states are coming up.
+        return Health(status=status, detail=detail or state, waking=status == "cold" and state != "scaledToZero")
 
     def suspend(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> None:
         """Pause the endpoint: not billed, keeps its URL, wakes only through an explicit resume."""

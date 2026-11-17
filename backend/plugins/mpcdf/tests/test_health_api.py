@@ -36,7 +36,7 @@ class HealthEndpointTest(unittest.TestCase):
              patch.object(mpcdf_sessions, "get_sessions", return_value=fake):
             r = self.client.get("/api/config/health").json()
         self.assertEqual(r["embedding"]["status"], "ready")
-        self.assertEqual(r["llm"], {"status": "unreachable", "detail": "not running"})
+        self.assertEqual(r["llm"], {"status": "unreachable", "detail": "not running", "waking": False})
 
     def test_a_side_whose_start_job_runs_is_reported_as_starting(self):
         get_settings().model_preset = "remote-mpcdf"
@@ -49,8 +49,8 @@ class HealthEndpointTest(unittest.TestCase):
         with patch.object(mpcdf_sessions, "available", return_value=True), \
              patch.object(mpcdf_sessions, "get_sessions", return_value=FakeSessions()):
             r = self.client.get("/api/config/health").json()
-        self.assertEqual(r["rerank"], {"status": "cold", "detail": "starting"})
-        self.assertEqual(r["llm"], {"status": "unreachable", "detail": "not running"})
+        self.assertEqual(r["rerank"], {"status": "cold", "detail": "starting", "waking": True})
+        self.assertEqual(r["llm"], {"status": "unreachable", "detail": "not running", "waking": False})
 
 
 if __name__ == "__main__":

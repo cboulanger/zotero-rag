@@ -96,6 +96,7 @@
  * @property {Record<string, string>} drafts
  * @property {Record<string, {level: string, text: string}>} notes
  * @property {StandinList|null} [standins]
+ * @property {Record<string, boolean>} [running] - keys (see `actionKey`) of the actions whose request is in flight
  */
 
 var ZoteroRAGPresetDialog = {
@@ -356,6 +357,40 @@ ZoteroRAGPresetDialog.mount = function (doc, root) {
  * @param {Document} doc
  * @returns {(tag: string, cls?: string) => any}
  */
+/**
+ * The key under which a button's action is tracked while its request runs.
+ * @param {string} scope - `header`, `side:<side>`, `account:<id>` or `standin`
+ * @param {string} id - the action id (`start`, `save`, a preset name, ...)
+ * @returns {string}
+ */
+ZoteroRAGPresetDialog.actionKey = function (scope, id) {
+	return `${scope}/${id}`;
+};
+
+/**
+ * Whether any action's request is in flight; every action button is disabled meanwhile.
+ * @param {LocalState} local
+ * @returns {boolean}
+ */
+ZoteroRAGPresetDialog.isBusy = function (local) {
+	return !!local.running && Object.keys(local.running).length > 0;
+};
+
+/**
+ * Set an action button's state: disabled when the action is, or while any action runs;
+ * the one whose request runs shows a spinner.
+ * @param {any} button
+ * @param {string} key - see `actionKey`
+ * @param {boolean} enabled - whether the action itself is available
+ * @param {LocalState} local
+ */
+ZoteroRAGPresetDialog._setButtonState = function (button, key, enabled, local) {
+	const mine = !!(local.running && local.running[key]);
+	button.disabled = !enabled || this.isBusy(local);
+	button.className = `${String(button.className || '').replace(/\s*\bpd-busy\b/g, '')}${mine ? ' pd-busy' : ''}`;
+	button.setAttribute('aria-busy', String(mine));
+};
+
 ZoteroRAGPresetDialog._el = function (doc) {
 	const NS = 'http://www.w3.org/1999/xhtml';
 	return (tag, cls = '') => {
@@ -397,6 +432,12 @@ ZoteroRAGPresetDialog.paint = function (doc, refs, view, local, handlers) {
 		const active = doc.activeElement;
 		return !!active && !!node && typeof node.contains === 'function' && node !== active && node.contains(active);
 	};
+	/** Focus in a text field or menu of `node` (a clicked button does not count: it must show its spinner). */
+	const hasTyping = (/** @type {any} */ node) => {
+		const active = /** @type {any} */ (doc.activeElement);
+		return hasFocus(node) && !/^button$/i.test(String(active.localName || active.tagName || active.tag || ''));
+	};
+	const busy = this.isBusy(local);
 
 	// Header
 	refs.title.textContent = view.preset.name;
@@ -414,10 +455,12 @@ ZoteroRAGPresetDialog.paint = function (doc, refs, view, local, handlers) {
 		refs.defaultSelect.value = view.preset.default_preset;
 		refs.defaultSelect.onchange = () => handlers.onDefaultChange(refs.defaultSelect.value);
 	}
+	refs.defaultSelect.disabled = busy;
 	const overall = this.overall(view.sides);
 	refs.overall.replaceChildren(this._dot(el, overall.state), doc.createTextNode ? doc.createTextNode(` ${overall.text}`) : overall.text);
-	refs.startAll.disabled = this.workflowRequests(view, 'start').length === 0;
-	refs.pauseAll.disabled = this.workflowRequests(view, 'pause').length === 0;
+	this._setButtonState(refs.startAll, this.actionKey('header', 'start'), this.workflowRequests(view, 'start').length > 0, local);
+	this._setButtonState(refs.pauseAll, this.actionKey('header', 'pause'), this.workflowRequests(view, 'pause').length > 0, local);
+	this._setButtonState(refs.checkNow, this.actionKey('header', 'check'), true, local);
 	const headerNote = local.notes.header;
 	refs.headerNote.textContent = headerNote ? headerNote.text : '';
 	refs.headerNote.className = `pd-header-note pd-msg-${headerNote ? headerNote.level : 'info'}`;
@@ -443,7 +486,7 @@ ZoteroRAGPresetDialog.paint = function (doc, refs, view, local, handlers) {
 
 	// Account cards
 	refs.noCards.hidden = view.accounts.length > 0;
-	if (!hasFocus(refs.cards)) {
+	if (!hasTyping(refs.cards)) {
 		refs.cards.replaceChildren();
 		for (const card of view.accounts) refs.cards.appendChild(this._card(doc, card, view, local, handlers));
 	}
@@ -528,7 +571,7 @@ ZoteroRAGPresetDialog._paintSide = function (doc, panel, side, local, handlers, 
 	for (const action of side.actions) {
 		const button = el('button', `pd-button${action.kind === 'primary' ? ' pd-primary' : action.kind === 'danger' ? ' pd-danger' : ''}`);
 		button.textContent = action.label;
-		button.disabled = !action.enabled;
+		this._setButtonState(button, this.actionKey(`side:${side.side}`, action.id), action.enabled, local);
 		button.title = action.reason || '';
 		button.addEventListener('click', () => handlers.onAction(action));
 		row.appendChild(button);
@@ -549,6 +592,7 @@ ZoteroRAGPresetDialog._paintSide = function (doc, panel, side, local, handlers, 
 			label.textContent = choice.text;
 			const use = el('button', 'pd-button');
 			use.textContent = 'Use';
+			this._setButtonState(use, this.actionKey('standin', choice.preset), true, local);
 			use.addEventListener('click', () => { if (handlers.onUseStandin) handlers.onUseStandin(choice.preset); });
 			item.append(label, use);
 			list.appendChild(item);
@@ -753,7 +797,9 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 	const scope = `account:${card.id}`;
 	/** @type {HTMLButtonElement|null} Enabled once a value is typed (see below). */
 	let save = null;
-	const updateSave = () => { if (save) save.disabled = !this.hasAccountInput(card, local.drafts); };
+	const updateSave = () => {
+		if (save) this._setButtonState(save, this.actionKey(scope, 'save'), this.hasAccountInput(card, local.drafts), local);
+	};
 	const fieldHandlers = { ...handlers, onDraft: updateSave };
 	for (const field of card.fields) node.appendChild(this._field(doc, field, scope, local, fieldHandlers));
 	const note = local.notes[scope];
@@ -771,7 +817,7 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 	for (const action of actions) {
 		const button = el('button', `pd-button${action.kind === 'primary' ? ' pd-primary' : action.kind === 'danger' ? ' pd-danger' : ''}`);
 		button.textContent = action.label;
-		button.disabled = action.enabled === false;
+		this._setButtonState(button, this.actionKey(scope, action.id), action.enabled !== false, local);
 		button.title = action.reason || '';
 		button.addEventListener('click', () => handlers.onCardAction && handlers.onCardAction(card, action));
 		row.appendChild(button);
@@ -807,7 +853,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	/** Refreshes while something is starting, after which polling stops (about 10 minutes). */
 	const MAX_POLLS = 120;
 	/** @type {{view: PresetView|null, local: LocalState}} */
-	const state = { view: null, local: { tab: '', logOpen: {}, drafts: {}, notes: {}, standins: null } };
+	const state = { view: null, local: { tab: '', logOpen: {}, drafts: {}, notes: {}, standins: null, running: {} } };
 	let polling = false;
 	// The stand-ins are offered by themselves once per dialog, the first time a side shows
 	// a used-up quota; afterwards only the side's button asks again.
@@ -830,6 +876,29 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		else delete state.local.notes[scope];
 		repaint();
 	};
+
+	/**
+	 * Run `fn` as the action `key`: while it runs, every action button is disabled and
+	 * this one shows a spinner, so a click visibly does something and cannot be repeated.
+	 * Only the request itself is tracked; the polling that follows is not.
+	 * @template T
+	 * @param {string} key - see `actionKey`
+	 * @param {() => Promise<T>} fn
+	 * @returns {Promise<T>}
+	 */
+	const track = async (key, fn) => {
+		const running = /** @type {Record<string, boolean>} */ (state.local.running);
+		running[key] = true;
+		repaint();
+		try {
+			return await fn();
+		} finally {
+			delete running[key];
+			repaint();
+		}
+	};
+	/** A click that arrives while another action runs (its button was disabled) does nothing. */
+	const busy = () => D.isBusy(state.local);
 
 	/** Fetch the view and repaint; false when the backend did not answer. */
 	const refresh = async () => {
@@ -856,13 +925,16 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		return true;
 	};
 
-	/** Refresh now and keep refreshing while a job runs or an endpoint is starting (bounded). */
-	const poll = async () => {
+	/**
+	 * Refresh now and keep refreshing while a job runs or an endpoint is starting (bounded).
+	 * @param {{refreshed?: boolean}} [options] - `refreshed`: the view was just fetched, start by waiting
+	 */
+	const poll = async (options = {}) => {
 		if (polling) return;
 		polling = true;
 		try {
 			for (let round = 0; ; round++) {
-				const ok = await refresh();
+				const ok = round === 0 && options.refreshed ? true : await refresh();
 				const view = state.view;
 				const active = !!view && (view.busy || view.sides.some((s) => s.state === 'starting'));
 				if (!ok || !active || round >= MAX_POLLS) break;
@@ -901,11 +973,16 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 * @param {UiAction} action
 	 */
 	const runAction = async (side, action) => {
-		if (action.id === 'standin') return showStandins(side);
-		if (!action.request) return;
-		note(`side:${side}`, 'info', `${action.label}…`);
-		const error = await send({ path: action.request.path, body: action.request.body, accounts: action.account ? [action.account] : [] });
-		note(`side:${side}`, error ? 'error' : 'info', error ? `${action.label} failed: ${error}` : '');
+		if (busy()) return;
+		const key = D.actionKey(`side:${side}`, action.id);
+		if (action.id === 'standin') return track(key, () => showStandins(side));
+		const request = action.request;
+		if (!request) return;
+		await track(key, async () => {
+			note(`side:${side}`, 'info', `${action.label}…`);
+			const error = await send({ path: request.path, body: request.body, accounts: action.account ? [action.account] : [] });
+			note(`side:${side}`, error ? 'error' : 'info', error ? `${action.label} failed: ${error}` : '');
+		});
 		await poll();
 	};
 
@@ -944,16 +1021,21 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 */
 	const useStandin = async (preset) => {
 		const offer = state.local.standins;
-		if (!offer || !deps.useStandin) return;
+		const use = deps.useStandin;
+		if (!offer || !use || busy()) return;
 		const scope = `side:${offer.side}`;
-		note(scope, 'info', `Switching to ${preset}…`);
-		try {
-			const choice = offer.choices.find((c) => c.preset === preset);
-			await deps.useStandin(preset, offer.provider, !!choice && !!choice.ready);
-		} catch (e) {
-			note(scope, 'error', e && typeof (/** @type {any} */ (e)).message === 'string' ? /** @type {any} */ (e).message : String(e));
-			return;
-		}
+		const used = await track(D.actionKey('standin', preset), async () => {
+			note(scope, 'info', `Switching to ${preset}…`);
+			try {
+				const choice = offer.choices.find((c) => c.preset === preset);
+				await use(preset, offer.provider, !!choice && !!choice.ready);
+				return true;
+			} catch (e) {
+				note(scope, 'error', e && typeof (/** @type {any} */ (e)).message === 'string' ? /** @type {any} */ (e).message : String(e));
+				return false;
+			}
+		});
+		if (!used) return;
 		state.local.standins = null;
 		note(scope, 'info', '');
 		note('header', 'info', ''); // the used-up quota is no longer the caller's concern
@@ -967,19 +1049,42 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 * @returns {Promise<number>} how many requests were sent
 	 */
 	const runWorkflow = async (kind, onlySides) => {
-		if (!state.view) return 0;
+		if (!state.view || busy()) return 0;
+		const sent = await track(D.actionKey('header', kind), () => sendWorkflow(kind, onlySides));
+		if (sent.requests.length) await reportWorkflow(kind, sent);
+		return sent.requests.length;
+	};
+
+	/**
+	 * Send the requests of Start all / Pause all (the part a button's spinner covers).
+	 * @param {'start'|'pause'} kind
+	 * @param {string[]} [onlySides]
+	 * @returns {Promise<{requests: Array<{path: string, body: Record<string, any>, accounts: string[]}>, errors: string[]}>}
+	 */
+	const sendWorkflow = async (kind, onlySides) => {
+		/** @type {string[]} */
+		const errors = [];
+		if (!state.view) return { requests: [], errors };
 		const requests = D.workflowRequests(state.view, kind, onlySides);
 		if (!requests.length) {
 			if (!onlySides) note('header', 'info', kind === 'start' ? 'Nothing to start.' : 'Nothing to pause.');
-			return 0;
+			return { requests, errors };
 		}
 		note('header', 'info', kind === 'start' ? 'Starting…' : 'Pausing…');
-		const errors = [];
 		for (const request of requests) {
 			const error = await send(request);
 			if (error) errors.push(error);
 		}
 		note('header', errors.length ? 'error' : 'info', errors.length ? errors.join(' ') : '');
+		return { requests, errors };
+	};
+
+	/**
+	 * Follow sent Start all / Pause all requests until the job settles, and name a side it failed on.
+	 * @param {'start'|'pause'} kind
+	 * @param {{requests: Array<{body: Record<string, any>}>, errors: string[]}} sent
+	 */
+	const reportWorkflow = async (kind, { requests, errors }) => {
 		await poll();
 		// The job runs in the background: a side it failed on says so only in its own tab,
 		// which may not be the one shown. Name it here and show it.
@@ -992,7 +1097,6 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 			state.local.tab = failed[0].side;
 			note('header', 'error', `${kind === 'start' ? 'Starting' : 'Pausing'} ${failed.map((s) => s.title).join(', ')} failed. ${reason.text}`);
 		}
-		return requests.length;
 	};
 
 	/**
@@ -1027,6 +1131,23 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 * @param {AccountCard} card
 	 */
 	const saveAccount = async (card) => {
+		if (busy()) return;
+		const scope = `account:${card.id}`;
+		const sent = await track(D.actionKey(scope, 'save'), () => saveAndStart(card));
+		if (sent && sent.requests.length) {
+			note(scope, 'ok', 'Saved. Starting the endpoints that use it.');
+			await reportWorkflow('start', sent);
+		}
+	};
+
+	/**
+	 * Store an account card's typed values and, for a card that starts its endpoints, send
+	 * the start requests (the part the Save button's spinner covers).
+	 * @param {AccountCard} card
+	 * @returns {Promise<{requests: Array<{path: string, body: Record<string, any>, accounts: string[]}>, errors: string[]}|null>}
+	 *   the start requests sent, null when nothing was started
+	 */
+	const saveAndStart = async (card) => {
 		const scope = `account:${card.id}`;
 		/** @type {Array<[UiField, string]>} */
 		const entered = [];
@@ -1036,7 +1157,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 			const error = D.validate(field, draft);
 			if (error) {
 				note(scope, 'error', error);
-				return;
+				return null;
 			}
 			entered.push([field, draft.trim()]);
 		}
@@ -1056,7 +1177,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 				const result = await deps.saveShared(field.key, value);
 				if (!result.ok) {
 					note(scope, 'error', `${field.label}: ${result.error || 'not saved'}`);
-					return;
+					return null;
 				}
 				changed.push(field);
 			}
@@ -1065,10 +1186,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		if (changed.length && deps.onKeysChanged) await deps.onKeysChanged(changed);
 		if (entered.length) note(scope, 'ok', 'Saved.');
 		await refresh();
-		if (card.auto_start) {
-			const started = await runWorkflow('start', card.serves);
-			if (started) note(scope, 'ok', 'Saved. Starting the endpoints that use it.');
-		}
+		return card.auto_start ? sendWorkflow('start', card.serves) : null;
 	};
 
 	/**
@@ -1077,7 +1195,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 * @param {UiAction} action
 	 */
 	const runCardAction = async (card, action) => {
-		if (!action.request) return;
+		if (!action.request || busy()) return;
 		const scope = `account:${card.id}`;
 		/** @type {Record<string, any>} */
 		let body = action.request.body || {};
@@ -1095,14 +1213,17 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 			const startRerank = deps.prefs.get(D.PREF_PREFIX + 'enableReranking') !== false;
 			body = { ...body, values, start_rerank: startRerank };
 		}
-		note(scope, 'info', `${action.label}…`);
-		let result;
-		try {
-			result = await deps.post(action.request.path, body);
-		} catch (e) {
-			note(scope, 'error', `${action.label} failed: ${String(e)}`);
-			return;
-		}
+		const path = action.request.path;
+		const result = await track(D.actionKey(scope, action.id), async () => {
+			note(scope, 'info', `${action.label}…`);
+			try {
+				return await deps.post(path, body);
+			} catch (e) {
+				note(scope, 'error', `${action.label} failed: ${String(e)}`);
+				return null;
+			}
+		});
+		if (!result) return;
 		if (!result.ok) {
 			note(scope, 'error', `${action.label} failed: ${result.data && result.data.detail ? result.data.detail : `HTTP ${result.status}`}`);
 			await refresh();
@@ -1120,8 +1241,11 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 * @param {string} name
 	 */
 	const setServerDefault = async (name) => {
-		note('header', 'info', 'Switching the server default…');
-		const result = await deps.post('/api/config', { preset_name: name });
+		if (busy()) return;
+		const result = await track(D.actionKey('header', 'default'), () => {
+			note('header', 'info', 'Switching the server default…');
+			return deps.post('/api/config', { preset_name: name });
+		});
 		if (!result.ok) {
 			note('header', 'error', `Could not switch: ${result.data && result.data.detail ? result.data.detail : `HTTP ${result.status}`}`);
 		} else {
@@ -1131,12 +1255,19 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		await refresh();
 	};
 
+	/** "Check now": one refresh with the button's spinner, then polling while something starts. */
+	const checkNow = async () => {
+		if (busy()) return;
+		const ok = await track(D.actionKey('header', 'check'), refresh);
+		if (ok) await poll({ refreshed: true });
+	};
+
 	/** @param {string} side */
 	const selectTab = (side) => { state.local.tab = side; repaint(); };
 	/** @param {string} side */
 	const toggleLog = (side) => { state.local.logOpen[side] = !state.local.logOpen[side]; repaint(); };
 
-	return { state, refresh, poll, runAction, useStandin, runWorkflow, setSideField, saveAccount, runCardAction, setServerDefault, selectTab, toggleLog };
+	return { state, refresh, poll, checkNow, runAction, useStandin, runWorkflow, setSideField, saveAccount, runCardAction, setServerDefault, selectTab, toggleLog };
 };
 
 if (typeof module !== 'undefined') module.exports = { ZoteroRAGPresetDialog };

@@ -65,7 +65,7 @@ Hooks, all optional: `describe()` (the provider-agnostic descriptor the plugin
 renders), `endpoint_url()`, `default_key_env()`, `key_docs_url()`,
 `unavailable_hint()` (remedy appended to "endpoint unavailable" errors),
 `live_models()`, `parse_usage(headers)` (quota meters, no billing),
-`health(creds)`, `classify_http_error(status, body)` (`"cold"` or `"paused"`;
+`health(creds)` (a `Health` whose `waking` flag marks a `cold` endpoint that is already coming up, so the dialog does not offer to wake it), `classify_http_error(status, body)` (`"cold"` or `"paused"`;
 called before an HTTP 400 is treated as a per-item problem),
 `provision(ctx, progress)`, `suspend(ctx, progress)`, `rerank_credentials(request, refresh)` and
 `rerank_activity(request)` (the re-ranking side's endpoint for the calling user, and a report that it

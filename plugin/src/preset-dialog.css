@@ -55,6 +55,11 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 .pd-button { font: inherit; padding: 4px 12px; border: 1px solid var(--pd-line); border-radius: 4px; background: var(--pd-chrome); color: var(--pd-ink); cursor: pointer; }
 .pd-button:hover:not([disabled]) { border-color: var(--pd-muted); }
 .pd-button[disabled] { opacity: .45; cursor: default; }
+/* The button whose request is in flight (preset-dialog-view.js `_setButtonState`). */
+.pd-button.pd-busy[disabled] { opacity: .8; cursor: progress; }
+.pd-busy::before { content: ""; display: inline-block; box-sizing: border-box; width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: pd-spin .8s linear infinite; }
+@keyframes pd-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pd-busy::before { animation-duration: 2.4s; } }
 .pd-primary { background: var(--pd-accent); color: var(--pd-accent-ink); border-color: var(--pd-accent); }
 .pd-danger { color: var(--pd-bad); }
 .pd-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; background: var(--pd-grey); }

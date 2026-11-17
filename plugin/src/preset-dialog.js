@@ -110,7 +110,7 @@ var ZoteroRAGPresetDialogWindow = {
 
 		refs.startAll.addEventListener('click', () => controller.runWorkflow('start'));
 		refs.pauseAll.addEventListener('click', () => controller.runWorkflow('pause'));
-		refs.checkNow.addEventListener('click', () => controller.poll());
+		refs.checkNow.addEventListener('click', () => controller.checkNow());
 
 		// External links (key portals) open in the system browser.
 		root.addEventListener('click', (e) => {

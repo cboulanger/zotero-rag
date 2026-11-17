@@ -199,7 +199,7 @@ def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideVi
         view.summary = "No status check for this provider"
     else:
         view.state = _HEALTH_STATE.get(health.status, "unknown")
-        view.summary = _HEALTH_SUMMARY.get(health.status, health.status)
+        view.summary = "Starting up" if health.status == "cold" and health.waking else _HEALTH_SUMMARY.get(health.status, health.status)
         if health.status != "ready" and health.detail:
             view.summary += f" ({health.detail})"
     if job_status == "failed":
