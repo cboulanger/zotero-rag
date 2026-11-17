@@ -597,6 +597,8 @@ class EndpointHealth(BaseModel):
     """Readiness of one remote endpoint."""
     status: str  # "ready" | "cold" | "throttled" | "paused" | "unreachable" — see backend.providers.types.Health
     detail: str
+    #: ``cold`` and already coming up; another wake-up request changes nothing.
+    waking: bool = False
 
 
 class EndpointHealthResponse(BaseModel):
@@ -648,7 +650,7 @@ def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = 
     health = provider.health(_side_credentials(preset, side, provider, request))
     if health is None:
         return None
-    return EndpointHealth(status=health.status, detail=health.detail)
+    return EndpointHealth(status=health.status, detail=health.detail, waking=health.waking)
 
 
 def _with_running_job(preset: HardwarePreset, side: str, health: Optional[EndpointHealth],
@@ -665,7 +667,7 @@ def _with_running_job(preset: HardwarePreset, side: str, health: Optional[Endpoi
     except ProviderConfigError:
         return health
     if provisioning.is_running(_slot_for({side: provider}, [side], get_zotero_identity(request)), [side]):
-        return EndpointHealth(status="cold", detail="starting")
+        return EndpointHealth(status="cold", detail="starting", waking=True)
     return health
 
 
@@ -696,6 +698,20 @@ _last_warmup: Dict[Tuple[str, str], float] = {}
 WARMUP_MIN_INTERVAL_SECONDS = 120.0
 
 
+def _caller_id(request: Request) -> str:
+    """Who asked for a warm-up, for ``_last_warmup``."""
+    identity = get_zotero_identity(request)
+    return str(identity.user_id) if identity else "local"
+
+
+def _recently_warmed(side: str, caller: str) -> bool:
+    """Whether a warm-up of ``side`` was sent for ``caller`` within ``WARMUP_MIN_INTERVAL_SECONDS``."""
+    import time
+
+    last = _last_warmup.get((side, caller))
+    return last is not None and time.monotonic() - last < WARMUP_MIN_INTERVAL_SECONDS
+
+
 async def _send_warmup(side: str, client_keys: Dict[str, str]) -> None:
     """One minimal real request, through the same service a query uses; the outcome is ignored."""
     from backend.dependencies import make_embedding_service, make_llm_service
@@ -716,23 +732,22 @@ async def warm_up_endpoints(request: Request, client_keys: Dict[str, str] = Depe
     Meant for the moment a user opens the question dialog: the first query then
     finds a running endpoint. Only sides reported ``cold`` are touched (a paused
     or unprovisioned endpoint is not woken by a request, and a ready one needs
-    nothing), each at most once per ``WARMUP_MIN_INTERVAL_SECONDS`` and caller.
+    nothing, and one already coming up needs no request), each at most once per
+    ``WARMUP_MIN_INTERVAL_SECONDS`` and caller.
     Returns the sides being warmed.
     """
     import time
 
     preset = get_settings().get_hardware_preset()
-    identity = get_zotero_identity(request)
-    caller = str(identity.user_id) if identity else "local"
+    caller = _caller_id(request)
     warming: List[str] = []
     for side in ("embedding", "llm"):
         health = await asyncio.to_thread(_check_side, preset, side, request)
-        if health is None or health.status != "cold":
+        if health is None or health.status != "cold" or health.waking:
             continue
-        now = time.monotonic()
-        if now - _last_warmup.get((side, caller), -WARMUP_MIN_INTERVAL_SECONDS) < WARMUP_MIN_INTERVAL_SECONDS:
+        if _recently_warmed(side, caller):
             continue
-        _last_warmup[(side, caller)] = now
+        _last_warmup[(side, caller)] = time.monotonic()
         task = asyncio.create_task(_send_warmup(side, dict(client_keys)))
         _warmup_tasks.add(task)  # keep a strong reference until done
         task.add_done_callback(_warmup_tasks.discard)
@@ -1189,7 +1204,10 @@ async def get_preset_view(request: Request) -> PresetView:
         if side_config(preset, side).model_type != "remote":
             continue
         checked = await asyncio.to_thread(_check_side, preset, side, request)
-        health[side] = Health(status=checked.status, detail=checked.detail) if checked else None
+        # A side woken a moment ago is coming up even while its provider still reports it idle.
+        waking = bool(checked and checked.status == "cold"
+                      and (checked.waking or _recently_warmed(side, _caller_id(request))))
+        health[side] = Health(status=checked.status, detail=checked.detail, waking=waking) if checked else None
         operable[side] = await _caller_may_operate(request, provider)
         descriptor = provider.describe()
         if provider.id not in sessions and descriptor.provisioning and descriptor.provisioning.login:

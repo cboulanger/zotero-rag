@@ -345,11 +345,13 @@ class TestHealth(unittest.TestCase):
         h = self.check(FakeResponse(200, {"workers": {"running": 1, "ready": 0, "idle": 0}, "jobs": {"inQueue": 2, "inProgress": 0}}))[0]
         self.assertEqual(h.status, "cold")
         self.assertIn("2 job(s) waiting", h.detail)
+        self.assertTrue(h.waking)
 
     def test_cold_when_scaled_to_zero_or_initializing(self):
-        self.assertEqual(self.check(FakeResponse(200, {"workers": {}, "jobs": {}}))[0].status, "cold")
+        idle = self.check(FakeResponse(200, {"workers": {}, "jobs": {}}))[0]
+        self.assertEqual((idle.status, idle.waking), ("cold", False))
         h = self.check(FakeResponse(200, {"workers": {"initializing": 1}}))[0]
-        self.assertEqual((h.status, h.detail), ("cold", "1 worker(s) initializing"))
+        self.assertEqual((h.status, h.detail, h.waking), ("cold", "1 worker(s) initializing", True))
 
     def test_throttled_when_runpod_has_no_capacity(self):
         h = self.check(FakeResponse(200, {"workers": {"throttled": 1}, "jobs": {"inQueue": 4}}))[0]

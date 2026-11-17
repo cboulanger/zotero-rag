@@ -200,8 +200,10 @@ class Provider:
                     request=UiRequest(path="/api/config/provision", body={"sides": [self.side]}),
                 ))
         if status == "cold" and self.side not in OPTIONAL_SIDES:  # warmup wakes embedding and llm
+            waking = bool(health and health.waking) or running
             actions.append(UiAction(
-                id="wake", label="Wake up", workflow="start",
+                id="wake", label="Wake up", workflow="start", enabled=not waking,
+                reason="The endpoint is already starting up." if waking else "",
                 request=UiRequest(path="/api/config/warmup"),
             ))
         if self.supports_suspend and operable and status in ("ready", "cold"):

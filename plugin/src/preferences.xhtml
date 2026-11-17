@@ -5,7 +5,6 @@
 </linkset>
 
 <vbox id="zotero-rag-prefs-container"
-      onload="Zotero.ZoteroRAG.initPrefPane(window)"
       xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
       xmlns:html="http://www.w3.org/1999/xhtml">
 
@@ -99,7 +98,9 @@
       "⚠️ rag-failed" tag, giving the reason. Zotero shows both as a small icon before the title.
       Tags are added as automatic tags, so Zotero's "Delete Automatic Tags in This Library" also
       removes them; in group libraries they are visible to (and synced for) all members. Removing
-      the "⚠️ rag-failed" tag asks the server to retry that attachment.
+      the "⚠️ rag-failed" tag asks the server to retry that attachment. The tags are checked
+      against the server once a day and after Zotero missed updates while it was closed (this
+      uses the key stored for automatic indexing); "Refresh" runs that check now.
     </html:div>
 
     <html:div style="display:flex;align-items:center;margin:6px 0 4px 0;">

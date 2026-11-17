@@ -11,6 +11,14 @@
 // (POST /api/indexed-tags/check): a stale refresh operation or a transient re-index must
 // not strip the tag from an attachment that is indexed again.
 //
+// The real-time path only sees events that happen while the plugin is polling, so tags
+// can drift (Zotero closed while events rotated out, events never emitted, tags edited by
+// hand or by another member's plugin). The plugin therefore also runs Refresh on its own:
+// on first contact, after a `gap`, and whenever the last completed reconciliation is
+// older than `autoRefreshHours` (default 24; 0 turns the automatic runs off). A refresh
+// needs the key stored for automatic indexing; without it the attempt fails and is
+// retried an hour later.
+//
 // A second tag, "⚠️ rag-failed", marks attachments the backend refuses to process (scan
 // too big/costly, or quarantined after repeated failures). It is applied from `failed`
 // events / `kind: "failed"` refresh ops, and removing it is how the user asks for a retry:
@@ -52,6 +60,13 @@ var IndexedTags = {
 	DEFAULT_TAG: '\u2705 rag-indexed',
 	PREF_ENABLED: 'extensions.zotero-rag.indexedTags.enabled',
 	PREF_CURSOR: 'extensions.zotero-rag.indexedTags.cursor',
+	// Epoch ms of the last completed reconciliation (manual or automatic).
+	PREF_LAST_REFRESH: 'extensions.zotero-rag.indexedTags.lastRefresh',
+	// Hours between automatic reconciliations; 0 disables them.
+	PREF_AUTO_REFRESH_HOURS: 'extensions.zotero-rag.indexedTags.autoRefreshHours',
+	DEFAULT_AUTO_REFRESH_HOURS: 24,
+	// After a failed automatic refresh (backend down, no auto-index key stored), wait this long.
+	AUTO_REFRESH_RETRY_MS: 3600000,
 	POLL_INTERVAL_MS: 15000,
 	// An "unindexed" event is held this long (and then re-checked against the backend)
 	// before the tag is removed: re-indexing deletes an attachment's chunks before
@@ -71,6 +86,12 @@ var IndexedTags = {
 	appliedSeq: new Map(),
 	/** Removals waiting out REMOVE_SETTLE_MS, keyed like appliedSeq. @type {Map<string, {libraryID: number, key: string, due: number}>} */
 	pendingRemovals: new Map(),
+	/** Automatic refresh in progress, if any. @type {Promise<void>|null} */
+	autoRefreshInFlight: null,
+	/** No automatic attempt before this time (epoch ms), set after a failure. */
+	autoRefreshNotBefore: 0,
+	/** A reconciliation is needed regardless of the interval (first contact, event gap). */
+	autoRefreshWanted: false,
 
 	/**
 	 * @param {any} plugin - the ZoteroRAGPlugin instance (backendURL, getAuthHeaders, log)
@@ -80,6 +101,8 @@ var IndexedTags = {
 		this.plugin = plugin;
 		this.running = true;
 		this.cursor = this._loadCursor();
+		this.autoRefreshNotBefore = 0;
+		this.autoRefreshWanted = false;
 		this._schedule(2000);
 		this._registerFailedTagObserver();
 	},
@@ -261,7 +284,15 @@ var IndexedTags = {
 			const key = /** @type {string} */ (ev.attachment_key);
 			if (ev.type === 'failed' || ev.type === 'unfailed') {
 				this.appliedSeq.set(id, ev.seq);
-				await this.setTagged(/** @type {any} */ (Zotero.Items.getByLibraryAndKey(libraryID, key)), ev.type === 'failed', this.failedTag);
+				const item = /** @type {any} */ (Zotero.Items.getByLibraryAndKey(libraryID, key));
+				await this.setTagged(item, ev.type === 'failed', this.failedTag);
+				// A quarantined attachment usually has no chunks; a leftover indexed tag
+				// would make it look fine. Queue the usual settled + confirmed removal
+				// (a later `indexed` event cancels it; the check keeps a tag that is right).
+				const indexedId = `${libraryID}/${key}`;
+				if (ev.type === 'failed' && item && item.hasTag?.(this.tag) && latest.get(indexedId)?.type !== 'indexed') {
+					this.pendingRemovals.set(indexedId, { libraryID, key, due: now + this.REMOVE_SETTLE_MS });
+				}
 				continue;
 			}
 			this.appliedSeq.set(id, ev.seq);
@@ -320,17 +351,74 @@ var IndexedTags = {
 			// First contact: follow from "now"; Refresh covers existing history.
 			const head = await this._api('/api/indexed-tags/events');
 			this.tag = head.tag || this.tag;
-		this.failedTag = head.failed_tag || this.failedTag;
+			this.failedTag = head.failed_tag || this.failedTag;
 			this._saveCursor(head.last_seq);
+			// Following from "now" skips history: reconcile it once.
+			this.autoRefreshWanted = true;
+			this.maybeAutoRefresh();
 			return;
 		}
 		const data = await this._api(`/api/indexed-tags/events?since=${this.cursor}`);
 		this.tag = data.tag || this.tag;
 		this.failedTag = data.failed_tag || this.failedTag;
-		if (data.gap) this._log('missed some index events while offline; run "Refresh indexed-status tags" to reconcile');
+		if (data.gap) {
+			this._log('missed some index events while offline; reconciling all tags');
+			this.autoRefreshWanted = true;
+		}
 		if (data.events.length) await this.applyEvents(data.events);
 		await this.flushDueRemovals();
 		if (data.last_seq > this.cursor) this._saveCursor(data.last_seq);
+		this.maybeAutoRefresh();
+	},
+
+	/**
+	 * Hours between automatic reconciliations (0 = off).
+	 * @returns {number}
+	 */
+	_autoRefreshHours() {
+		const raw = Zotero.Prefs.get(this.PREF_AUTO_REFRESH_HOURS, true);
+		const n = Number(raw);
+		return raw === undefined || raw === null || raw === '' || !Number.isFinite(n) ? this.DEFAULT_AUTO_REFRESH_HOURS : n;
+	},
+
+	/**
+	 * @param {number} [now]
+	 * @returns {boolean}
+	 */
+	isAutoRefreshDue(now = Date.now()) {
+		if (this.autoRefreshInFlight || now < this.autoRefreshNotBefore) return false;
+		const hours = this._autoRefreshHours();
+		if (hours <= 0) return false;
+		if (this.autoRefreshWanted) return true;
+		const last = Number(Zotero.Prefs.get(this.PREF_LAST_REFRESH, true));
+		if (!Number.isFinite(last) || last <= 0) return true;
+		return now - last >= hours * 3600000;
+	},
+
+	/**
+	 * Start a background reconciliation if one is due. Does not wait for it: a full
+	 * refresh can take minutes, and the real-time poll keeps running alongside it
+	 * (stale refresh ops are dropped via appliedSeq).
+	 * @param {number} [now]
+	 * @returns {Promise<void>|null} the run, when one was started
+	 */
+	maybeAutoRefresh(now = Date.now()) {
+		if (!this.running || !this.isEnabled() || !this.isAutoRefreshDue(now)) return null;
+		this._log('starting automatic tag reconciliation');
+		this.autoRefreshInFlight = (async () => {
+			try {
+				const stats = await this.refresh();
+				this.autoRefreshWanted = false;
+				this._log(`automatic reconciliation done: ${stats.attachmentsChecked} checked, ${stats.added} tagged, ${stats.removed} untagged`
+					+ (stats.errors.length ? `, errors: ${stats.errors.join('; ')}` : ''));
+			} catch (e) {
+				this.autoRefreshNotBefore = Date.now() + this.AUTO_REFRESH_RETRY_MS;
+				this._log(`automatic reconciliation failed (retrying in an hour): ${e}`);
+			} finally {
+				this.autoRefreshInFlight = null;
+			}
+		})();
+		return this.autoRefreshInFlight;
 	},
 
 	/**
@@ -484,7 +572,10 @@ var IndexedTags = {
 				}
 			}
 			if (onProgress) onProgress({ ...stats });
-			if (page.done) return stats;
+			if (page.done) {
+				Zotero.Prefs.set(this.PREF_LAST_REFRESH, String(Date.now()), true);
+				return stats;
+			}
 			await new Promise(resolve => setTimeout(resolve, this.REFRESH_POLL_MS));
 		}
 	},

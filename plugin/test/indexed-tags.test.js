@@ -248,3 +248,96 @@ test('refresh surfaces a terminal error record', async () => {
 	});
 	await assert.rejects(() => T.refresh(), /boom/);
 });
+
+test('a failed event adds the failed tag and queues a confirmed removal of a stale indexed tag', async () => {
+	const item = makeItem('A', { tagged: true });
+	const { T } = setup({ items: [item], indexedOnBackend: [] });
+	await T.applyEvents([{ seq: 7, type: 'failed', library_id: 'u42', attachment_key: 'A' }], 0);
+	assert.strictEqual(item.hasTag(T.failedTag), true);
+	assert.strictEqual(item.hasTag(TAG), true, 'removal waits out the settle time');
+	await T.flushDueRemovals(T.REMOVE_SETTLE_MS);
+	assert.strictEqual(item.hasTag(TAG), false);
+});
+
+test('a failed event keeps the indexed tag when the backend still has chunks', async () => {
+	const item = makeItem('A', { tagged: true });
+	const { T } = setup({ items: [item], indexedOnBackend: ['A'] });
+	await T.applyEvents([{ seq: 7, type: 'failed', library_id: 'u42', attachment_key: 'A' }], 0);
+	await T.flushDueRemovals(1e9);
+	assert.strictEqual(item.hasTag(TAG), true);
+	assert.strictEqual(item.hasTag(T.failedTag), true);
+});
+
+const REFRESH_DONE = {
+	'/api/indexed-tags/refresh/': { offset: 1, done: true, records: [{ type: 'done' }] },
+	'/api/indexed-tags/refresh': { run_id: 'r1', tag: TAG },
+};
+
+test('automatic refresh is due when never run, after the interval, or when requested', () => {
+	const { T, stored } = setup();
+	const H = 3600000;
+	assert.strictEqual(T.isAutoRefreshDue(10 * H), true, 'never reconciled');
+	stored[T.PREF_LAST_REFRESH] = String(10 * H);
+	assert.strictEqual(T.isAutoRefreshDue(10 * H + 23 * H), false);
+	assert.strictEqual(T.isAutoRefreshDue(10 * H + 24 * H), true);
+	T.autoRefreshWanted = true;
+	assert.strictEqual(T.isAutoRefreshDue(10 * H + 1), true, 'gap/first contact overrides the interval');
+	stored[T.PREF_AUTO_REFRESH_HOURS] = 0;
+	assert.strictEqual(T.isAutoRefreshDue(10 * H + 1), false, '0 turns automatic runs off');
+	stored[T.PREF_AUTO_REFRESH_HOURS] = 2;
+	T.autoRefreshWanted = false;
+	assert.strictEqual(T.isAutoRefreshDue(12 * H), true);
+});
+
+test('a gap in the event log starts an automatic refresh that records its completion', async () => {
+	const item = makeItem('A');
+	const { T, stored, calls } = setup({
+		items: [item],
+		prefs: {
+			'extensions.zotero-rag.indexedTags.enabled': true,
+			'extensions.zotero-rag.indexedTags.cursor': '3',
+			'extensions.zotero-rag.indexedTags.lastRefresh': String(Date.now()),
+		},
+		responses: {
+			'/api/indexed-tags/events': { tag: TAG, events: [], last_seq: 9000, gap: true },
+			...REFRESH_DONE,
+		},
+	});
+	T.running = true;
+	T.cursor = 3;
+	await T.pollOnce();
+	assert.ok(T.autoRefreshInFlight, 'refresh started without blocking the poll');
+	await T.autoRefreshInFlight;
+	assert.ok(calls.some(c => c.url.endsWith('/api/indexed-tags/refresh') && c.init.method === 'POST'));
+	assert.strictEqual(T.autoRefreshWanted, false);
+	assert.ok(Number(stored[T.PREF_LAST_REFRESH]) > 0);
+	assert.strictEqual(T.autoRefreshInFlight, null);
+});
+
+test('only one automatic refresh runs at a time', () => {
+	const { T } = setup({ prefs: { 'extensions.zotero-rag.indexedTags.enabled': true }, responses: REFRESH_DONE });
+	T.running = true;
+	const first = T.maybeAutoRefresh();
+	assert.ok(first);
+	assert.strictEqual(T.maybeAutoRefresh(), null);
+	return first;
+});
+
+test('a failed automatic refresh backs off instead of retrying every poll', async () => {
+	const { T, stored } = setup({
+		prefs: { 'extensions.zotero-rag.indexedTags.enabled': true },
+		responses: { '/api/indexed-tags/refresh': () => { throw new Error('Enable automatic indexing in Preferences first'); } },
+	});
+	T.running = true;
+	await T.maybeAutoRefresh();
+	assert.strictEqual(stored[T.PREF_LAST_REFRESH], undefined);
+	assert.ok(T.autoRefreshNotBefore > Date.now());
+	assert.strictEqual(T.maybeAutoRefresh(), null);
+	assert.strictEqual(T.maybeAutoRefresh(T.autoRefreshNotBefore) !== null, true);
+});
+
+test('automatic refresh does not run while the feature is disabled', () => {
+	const { T } = setup({ responses: REFRESH_DONE });
+	T.running = true;
+	assert.strictEqual(T.maybeAutoRefresh(), null);
+});

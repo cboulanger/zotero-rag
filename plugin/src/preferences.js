@@ -1,7 +1,7 @@
-// Preferences pane logic — called via onload in preferences.xhtml
+// Preferences pane logic — called from preferences-pane.js on the pane's load event
 
 /**
- * Initialize the preferences pane. Called by the XUL onload attribute.
+ * Initialize the preferences pane. Called by preferences-pane.js on the pane's load event.
  * ZoteroRAG is already loaded in the global scope by bootstrap.js.
  * @param {Window} _window
  */
@@ -624,8 +624,9 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		});
 	}
 
-	// Indexed-status tags: opt-in real-time tagging (polled by IndexedTags) plus a
-	// manual full reconciliation that reuses the key stored for automatic indexing.
+	// Indexed-status tags: opt-in real-time tagging (polled by IndexedTags) plus a full
+	// reconciliation (run daily by IndexedTags, or now via this button) that reuses the
+	// key stored for automatic indexing.
 	const indexedTagsToggle = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-toggle'));
 	const indexedTagsRefresh = /** @type {HTMLButtonElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-refresh'));
 	const indexedTagsStatus = doc.getElementById('zotero-rag-indexed-tags-status');

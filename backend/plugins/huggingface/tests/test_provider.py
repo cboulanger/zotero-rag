@@ -70,6 +70,12 @@ class TestHealth(unittest.TestCase):
                                 ("failed", "unreachable"), ("updateFailed", "unreachable"), ("weird", "unreachable")]:
             self.check(state, expected)
 
+    def test_only_a_scaled_to_zero_endpoint_waits_for_a_wake_up_request(self):
+        self.assertFalse(self.check("scaledToZero", "cold").waking)
+        for state in ("pending", "initializing", "updating"):
+            self.assertTrue(self.check(state, "cold").waking, state)
+        self.assertFalse(self.check("running", "ready").waking)
+
     def test_failure_message_is_shown_and_scale_to_zero_is_explained(self):
         self.assertIn("out of memory", self.check("failed", "unreachable", message="out of memory").detail)
         self.assertIn("scaled to zero", self.check("scaledToZero", "cold").detail)

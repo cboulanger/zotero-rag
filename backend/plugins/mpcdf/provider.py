@@ -221,4 +221,5 @@ class MpcdfProvider(Provider):
             status, detail = sessions.call(lambda: sessions.endpoint_state(creds.user_id, self.preset_name))
         except Exception as exc:
             return Health(status="unreachable", detail=str(exc) or type(exc).__name__)
-        return Health(status=status, detail=detail)
+        # A cold MPCDF endpoint is always one whose job is starting.
+        return Health(status=status, detail=detail, waking=status == "cold")

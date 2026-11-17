@@ -88,10 +88,15 @@ class Health(BaseModel):
     provider has no capacity right now; ``paused`` was stopped on purpose and
     will not wake until resumed; ``unreachable`` includes "nothing provisioned
     yet" and any provider-side failure.
+
+    ``waking`` qualifies ``cold``: the endpoint is already coming up (a worker is
+    loading, a start job runs, a wake-up request was just sent), so another
+    request to wake it would change nothing.
     """
 
     status: HealthStatus
     detail: str = ""
+    waking: bool = False
 
 
 class ModelInfo(BaseModel):

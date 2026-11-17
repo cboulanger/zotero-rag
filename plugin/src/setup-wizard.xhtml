@@ -7,25 +7,7 @@
 <head>
   <title>Zotero RAG Setup Wizard</title>
   <meta charset="utf-8"/>
-  <script>
-    document.addEventListener("DOMContentLoaded", () => {
-      try {
-        Services.scriptloader.loadSubScript("chrome://zotero/content/include.js", window);
-      } catch (e) {
-        console.error("Failed to load include.js:", e);
-      }
-      try {
-        Services.scriptloader.loadSubScript("chrome://zotero-rag/content/provider-sections.js", window);
-      } catch (e) {
-        console.error("Failed to load provider-sections.js:", e);
-      }
-      try {
-        Services.scriptloader.loadSubScript("chrome://zotero-rag/content/setup-wizard.js", window);
-      } catch (e) {
-        console.error("Failed to load setup-wizard.js:", e);
-      }
-    });
-  </script>
+  <script src="chrome://zotero-rag/content/setup-wizard-loader.js"/>
   <style>
     html, body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; }
     .wizard-container { display: flex; flex-direction: column; padding: 16px; box-sizing: border-box; }

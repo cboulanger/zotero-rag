@@ -544,7 +544,7 @@ class RunPodProvider(Provider):
                 in_queue = int(jobs.get("inQueue") or 0)
                 in_progress = int(jobs.get("inProgress") or 0)
                 if in_queue > 0 and in_progress == 0:
-                    return Health(status="cold", detail=f"worker starting, {in_queue} job(s) waiting for it")
+                    return Health(status="cold", detail=f"worker starting, {in_queue} job(s) waiting for it", waking=True)
                 return Health(status="ready", detail=f"{ready} ready, {running} running workers")
             throttled = int(workers.get("throttled") or 0)
             if throttled > 0:
@@ -556,7 +556,7 @@ class RunPodProvider(Provider):
                 )
             initializing = int(workers.get("initializing") or 0)
             if initializing > 0:
-                return Health(status="cold", detail=f"{initializing} worker(s) initializing")
+                return Health(status="cold", detail=f"{initializing} worker(s) initializing", waking=True)
             return Health(status="cold", detail="No ready or running workers (scaled to zero)")
         except Exception as exc:  # display-only signal: must never break the health route
             return Health(status="unreachable", detail=str(exc) or type(exc).__name__)

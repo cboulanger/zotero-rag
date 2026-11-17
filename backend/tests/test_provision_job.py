@@ -337,7 +337,7 @@ class HealthEndpointTest(unittest.TestCase):
         get_settings().model_preset = fakes.write_managed_cloud_preset(get_settings().data_path)
         with patch.dict("os.environ", {}, clear=True):
             r = self.client.get("/api/config/health")
-        self.assertEqual(r.json()["embedding"], {"status": "unreachable", "detail": "not configured"})
+        self.assertEqual(r.json()["embedding"], {"status": "unreachable", "detail": "not configured", "waking": False})
 
 
 if __name__ == "__main__":
@@ -472,7 +472,7 @@ class UserScopeProvisionTest(unittest.TestCase):
             from backend.services.endpoint_cache import endpoint_cache
             endpoint_cache.clear()
             r = self.client.get("/api/config/health", headers={"X-Zotero-API-Key": "Z", self.KEY_HEADER: "bob"})
-        self.assertEqual(r.json()["llm"], {"status": "unreachable", "detail": "not provisioned"})
+        self.assertEqual(r.json()["llm"], {"status": "unreachable", "detail": "not provisioned", "waking": False})
 
     def test_health_without_any_key_is_not_configured(self):
         with self._as(7):

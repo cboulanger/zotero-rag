@@ -96,6 +96,32 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertEqual([a["id"] for a in side["actions"]], ["pause"])
         self.assertEqual(side["actions"][0]["request"]["path"], "/api/config/suspend")
 
+    def test_an_idle_endpoint_offers_wake_up(self):
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"}, health=Health(status="cold"))
+        side = self._side(body, "llm")
+        wake = next(a for a in side["actions"] if a["id"] == "wake")
+        self.assertTrue(wake["enabled"])
+        self.assertTrue(side["summary"].startswith("Idle"))
+
+    def test_an_endpoint_already_starting_up_disables_wake_up(self):
+        waking = Health(status="cold", detail="1 worker(s) initializing", waking=True)
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"}, health=waking)
+        side = self._side(body, "llm")
+        wake = next(a for a in side["actions"] if a["id"] == "wake")
+        self.assertFalse(wake["enabled"])
+        self.assertIn("already starting", wake["reason"])
+        self.assertTrue(side["summary"].startswith("Starting up"), side["summary"])
+
+    def test_an_endpoint_woken_a_moment_ago_disables_wake_up(self):
+        from backend.api import config as config_api
+        import time
+        config_api._last_warmup.clear()
+        self.addCleanup(config_api._last_warmup.clear)
+        config_api._last_warmup[("llm", "5")] = time.monotonic()
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"}, health=Health(status="cold"))
+        self.assertFalse(next(a for a in self._side(body, "llm")["actions"] if a["id"] == "wake")["enabled"])
+        self.assertTrue(next(a for a in self._side(body, "embedding")["actions"] if a["id"] == "wake")["enabled"])
+
     def test_a_running_job_shows_starting_and_its_log(self):
         provisioning.mark_running(["llm"], provisioning.user_slot(5))
         provisioning._add_progress(provisioning.user_slot(5), "llm", "creating endpoint")
