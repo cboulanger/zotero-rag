@@ -198,6 +198,8 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		presetSummary.textContent = '';
 		if (!fetched) return;
 		const view = ZoteroRAGPresetDialog.applyLocalState(fetched, (name) => Zotero.Prefs.get(name, true));
+		// Lets the Configure preset dialog tell when what it finds differs from what is shown here.
+		this.presetSideStates = ZoteroRAGPresetDialog.sideStates(view);
 		for (const side of view.sides) {
 			const dot = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
 			dot.className = `preset-dot ${side.state}`;

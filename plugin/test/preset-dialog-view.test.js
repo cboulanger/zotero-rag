@@ -575,6 +575,27 @@ test('a side changing state is announced to the other windows, an unchanged refr
 	assert.strictEqual(announced, 1);
 });
 
+test('the first load announces states that differ from what the other windows last showed', async () => {
+	const down = view([side('rerank', { state: 'down' })]);
+	const ready = view([side('rerank')]);
+	// Preferences last showed re-ranking ready; the dialog opens and finds it down.
+	let shown = '';
+	const shownStates = { get: () => shown || null, set: (/** @type {string} */ s) => { shown = s; } };
+	const loadD = load();
+	shown = loadD.sideStates(loadD.applyLocalState(JSON.parse(JSON.stringify(ready)), () => undefined));
+	let announced = 0;
+	const { controller } = setup({ views: [down, down], extra: { shownStates, onPresetChanged: () => { announced++; } } });
+	await controller.refresh();
+	assert.strictEqual(announced, 1, 'the other windows hear about the change');
+	await controller.refresh();
+	assert.strictEqual(announced, 1);
+	// Nothing differs: opening the dialog announces nothing.
+	let quiet = 0;
+	const again = setup({ views: [down], extra: { shownStates, onPresetChanged: () => { quiet++; } } });
+	await again.controller.refresh();
+	assert.strictEqual(quiet, 0);
+});
+
 test('Start all that ends with a failed side says so in the header and shows that side', async () => {
 	const down = view([side('extraction'), side('llm', { state: 'down', actions: [start('llm')] })]);
 	const failed = view([side('extraction'), side('llm', { state: 'down', actions: [start('llm')],

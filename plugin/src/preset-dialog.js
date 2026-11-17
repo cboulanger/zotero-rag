@@ -89,6 +89,11 @@ var ZoteroRAGPresetDialogWindow = {
 				plugin.notifyPresetChanged('preset-dialog');
 			},
 			onPresetChanged: () => plugin.notifyPresetChanged('preset-dialog'),
+			// Side states the windows last showed (see ZoteroRAGPlugin.presetSideStates).
+			shownStates: {
+				get: () => plugin.presetSideStates || null,
+				set: (states) => { plugin.presetSideStates = states; },
+			},
 			fetchStandinOffer: () => plugin.fetchStandinOffer(),
 			// Throws the server's message on a refusal (409), which the controller shows.
 			useStandin: (preset, provider, startEndpoints) => plugin.useStandin(preset, provider, startEndpoints),

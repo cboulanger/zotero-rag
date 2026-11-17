@@ -232,6 +232,13 @@ class ZoteroRAGPlugin {
 		/** @type {string|null} Provider whose used-up quota the active stand-in covers (known once chosen here) */
 		this.standinProvider = null;
 
+		/**
+		 * Endpoint side states (ZoteroRAGPresetDialog.sideStates) last shown by Preferences or the
+		 * Configure preset dialog; the dialog tells the other windows when it finds them changed.
+		 * @type {string|null}
+		 */
+		this.presetSideStates = null;
+
 		/** @type {number} */
 		this.maxConcurrentQueries = 5;
 

@@ -905,6 +905,7 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
  *   sessionKeys: SessionKeys,
  *   onKeysChanged?: (fields: UiField[]) => Promise<void>,
  *   onPresetChanged?: () => void,
+ *   shownStates?: {get: () => string|null, set: (states: string) => void},
  *   fetchStandinOffer?: () => Promise<StandinOffer|null>,
  *   useStandin?: (preset: string, provider: string, startEndpoints: boolean) => Promise<void>,
  *   paint: (view: PresetView, local: any) => void,
@@ -975,10 +976,14 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 			return false;
 		}
 		// Client-side settings live in this Zotero's preferences, not on the server.
-		const before = state.view ? D.sideStates(state.view) : null;
+		// On the first load, compare with what the other windows last showed (Preferences may
+		// have fetched long ago), so they don't keep showing an endpoint state that has changed.
+		const before = state.view ? D.sideStates(state.view) : (deps.shownStates ? deps.shownStates.get() : null);
 		state.view = D.applyLocalState(view, deps.prefs.get);
-		// A side came up, went down or started: the query dialog follows at once.
-		if (before !== null && before !== D.sideStates(state.view) && deps.onPresetChanged) deps.onPresetChanged();
+		const after = D.sideStates(state.view);
+		if (deps.shownStates) deps.shownStates.set(after);
+		// A side came up, went down or started: the query dialog and Preferences follow at once.
+		if (before !== null && before !== after && deps.onPresetChanged) deps.onPresetChanged();
 		if (state.local.notes.header && state.local.notes.header.level === 'error') delete state.local.notes.header;
 		repaint();
 		const quotaSide = standinsOffered ? null : state.view.sides.find((s) => s.actions.some((a) => a.id === 'standin'));
